@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Exits · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  {% if flash %}<div class="notice {{ 'bad' if flash.bad }}">{{ flash.text }}</div>{% endif %}
+  {% if errors %}
+  <div class="notice bad">Not saved:<ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>
+  {% endif %}
+
+  <section>
+    <h2>Exits</h2>
+    <p class="muted">Provider WireGuard tunnels from this server. Lists send traffic through them; everything else leaves from this server's own address.</p>
+    {% if exits %}
+    <div class="scroll"><table>
+      <tr><th>Name</th><th>Endpoint</th><th>IPv6</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th><th></th></tr>
+      {% for e in exits %}
+      {% set s = e.status %}
+      <tr>
+        <td>{{ e.name }}</td>
+        <td class="mono">{{ e.endpoint }}</td>
+        <td>{{ "yes" if e.ipv6 else "no" }}</td>
+        <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif s and s.up %}<span class="ok">up</span>{% elif s %}<span class="bad">down</span>{% else %}<span class="muted">starting</span>{% endif %}</td>
+        <td>{{ (s.handshake_age | age) if s else "—" }}</td>
+        <td class="num">{{ (s.rx | bytes) if s else "—" }}</td>
+        <td class="num">{{ (s.tx | bytes) if s else "—" }}</td>
+        <td class="actions">
+          <form method="post" action="/exits/{{ e.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="link">{{ "Disable" if e.enabled else "Enable" }}</button></form>
+          <form method="post" action="/exits/{{ e.id }}/delete" data-confirm="Delete {{ e.name }}?"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="link" {{ "disabled title=\"Used by a list\"" | safe if e.in_use }}>Delete</button></form>
+        </td>
+      </tr>
+      <tr class="subrow"><td colspan="8">
+        <details><summary>Replace config (switch server)</summary>
+          <form method="post" action="/exits/{{ e.id }}/replace"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <textarea name="conf" spellcheck="false" placeholder="Paste the new WireGuard .conf"></textarea>
+            <p><button type="submit">Replace</button></p>
+          </form>
+        </details>
+      </td></tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="muted">No exits yet.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Add exit</h2>
+    <form method="post" action="/exits/add">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p><input type="text" name="name" placeholder="name, e.g. NL 1" value="{{ values.name or '' }}" style="max-width: 280px"></p>
+      <textarea name="conf" spellcheck="false" placeholder="Paste a WireGuard .conf from Proton, Nord, …"></textarea>
+      <p class="muted">The private key stays on this server and is never shown again. IPv6 is used when the config has an IPv6 address.</p>
+      <p><button type="submit" class="primary">Add exit</button></p>
+    </form>
+  </section>
+</main>
+<script>
+document.querySelectorAll("form[data-confirm]").forEach(function (f) {
+  f.addEventListener("submit", function (ev) { if (!confirm(f.dataset.confirm)) ev.preventDefault(); });
+});
+</script>
+{% endblock %}

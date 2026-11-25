@@ -1,0 +1,43 @@
+[project]
+name = "vpn-egress"
+version = "0.1.0"
+description = "Route domains and IPs through multiple WireGuard VPN exits, from a web panel"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.optional-dependencies]
+panel = [
+  "fastapi==0.165.0",
+  "uvicorn==0.54.0",
+  "authlib==1.9.10",
+  "httpx==0.28.1",
+  "itsdangerous==2.2.0",
+  "jinja2==3.1.6",
+  "python-multipart==0.0.34",
+]
+
+[project.scripts]
+vpn-egress-router = "vpn_egress.router.main:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vpn_egress"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

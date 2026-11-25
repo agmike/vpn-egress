@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Lists · Egress{% endblock %}
+{% macro list_fields(l, exits) %}
+  <div class="fields">
+    <label>Name <input type="text" name="name" value="{{ l.name }}"></label>
+    <label>Exit
+      <select name="exit" data-exit-select>
+        {% for e in exits %}<option value="{{ e.id }}" data-dns="{{ 'yes' if e.has_dns else 'no' }}" {{ "selected" if e.id == l.exit }}>{{ e.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="check" title="While the exit is down, block this list's traffic instead of sending it the normal way">
+      <input type="checkbox" name="kill_switch" {{ "checked" if l.when_down == "block" }}> Kill switch</label>
+    <label class="check" data-exit-dns title="Look up this list's domains with the exit's DNS server, so answers match the exit's location">
+      <input type="checkbox" name="resolve_via_exit" {{ "checked" if l.resolve_via_exit }}> Use exit DNS</label>
+  </div>
+  <textarea name="entries" spellcheck="false" placeholder="one per line: example.com, 203.0.113.0/24, 2001:db8::/32, # comments">{{ l.entries }}</textarea>
+{% endmacro %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  {% if flash %}<div class="notice {{ 'bad' if flash.bad }}">{{ flash.text }}</div>{% endif %}
+  <p class="muted">Destinations on a list leave through its exit; the first matching list wins. Everything else leaves from this server's own address.</p>
+
+  {% if not exits %}
+  <section><p>Add an <a href="/exits">exit</a> first.</p></section>
+  {% endif %}
+
+  {% for l in lists %}
+  <section id="list-{{ l.id }}">
+    <div class="cardhead">
+      <h2>{{ loop.index }}. {{ l.name }}</h2>
+      <div class="actions">
+        <form method="post" action="/lists/{{ l.id }}/move"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="dir" value="up">
+          <button type="submit" class="link" {{ "disabled" if loop.first }} title="Higher priority">↑</button></form>
+        <form method="post" action="/lists/{{ l.id }}/move"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="dir" value="down">
+          <button type="submit" class="link" {{ "disabled" if loop.last }} title="Lower priority">↓</button></form>
+        <form method="post" action="/lists/{{ l.id }}/delete" data-confirm="Delete {{ l.name }}?"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="link">Delete</button></form>
+      </div>
+    </div>
+    {% if l.errors %}<div class="notice bad">Not saved:<ul>{% for e in l.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+    {% set s = l.status %}
+    {% if s %}<p class="muted">{{ s.v4 }} IPv4 · {{ s.v6 }} IPv6 · {{ s.domains }} domains · {{ s.learned4 + s.learned6 }} IPs learned from DNS</p>{% endif %}
+    <form method="post" action="/lists/{{ l.id }}/save">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {{ list_fields(l, exits) }}
+      <p><button type="submit" class="primary">Save</button></p>
+    </form>
+  </section>
+  {% endfor %}
+
+  {% if exits %}
+  <section id="new-list">
+    <h2>Add list</h2>
+    {% if new.errors %}<div class="notice bad">Not saved:<ul>{% for e in new.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+    <form method="post" action="/lists/add">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {{ list_fields(new, exits) }}
+      <p><button type="submit" class="primary">Add list</button></p>
+    </form>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>List format</h2>
+    <p>One entry per line:</p>
+    <table class="format">
+      <tr><td class="mono">dmm.co.jp</td><td>the domain and all its subdomains</td></tr>
+      <tr><td class="mono">*.dmm.co.jp</td><td>the same (the <span class="mono">*.</span> is optional)</td></tr>
+      <tr><td class="mono">jp</td><td>a whole top-level domain: everything under .jp</td></tr>
+      <tr><td class="mono">203.0.113.7</td><td>one IPv4 address</td></tr>
+      <tr><td class="mono">203.0.113.0/24</td><td>an IPv4 range</td></tr>
+      <tr><td class="mono">2001:db8::/32</td><td>an IPv6 address or range</td></tr>
+      <tr><td class="mono"># streaming CDNs</td><td>a comment, on its own line or after an entry</td></tr>
+    </table>
+    <p class="muted">Domains route by the addresses they resolve to: the first lookup teaches this server the IPs, so a site may need a reload after it's added. Other sites that share a CDN address with a listed one go the same way. <b>Kill switch</b> blocks the list's traffic while its exit is down; without it, the traffic takes the normal route meanwhile. <b>Use exit DNS</b> looks the list's domains up with the exit's DNS server, so answers match the exit's location; it shows only for exits whose config has a DNS server.</p>
+  </section>
+</main>
+<script>
+document.querySelectorAll("form").forEach(function (form) {
+  const sel = form.querySelector("[data-exit-select]");
+  const box = form.querySelector("[data-exit-dns]");
+  if (!sel || !box) return;
+  function sync() {
+    const opt = sel.options[sel.selectedIndex];
+    const show = opt && opt.dataset.dns === "yes";
+    box.hidden = !show;
+    box.querySelector("input").disabled = !show;
+  }
+  sel.addEventListener("change", sync);
+  sync();
+});
+document.querySelectorAll("form[data-confirm]").forEach(function (f) {
+  f.addEventListener("submit", function (ev) { if (!confirm(f.dataset.confirm)) ev.preventDefault(); });
+});
+</script>
+{% endblock %}

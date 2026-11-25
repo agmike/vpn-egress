@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Egress{% endblock %}
+{% block body %}
+<main>
+  <section>
+    <h2>{{ title }}</h2>
+    {% if text %}<p>{{ text }}</p>{% endif %}
+    <p>{% if retry %}<a class="button" href="/login">Try again</a> {% endif %}<a href="/">Home</a></p>
+  </section>
+</main>
+{% endblock %}

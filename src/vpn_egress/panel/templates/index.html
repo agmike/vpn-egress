@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  {% if status is none %}
+  <section><h2>Router</h2><p class="warn">No status from egress-apply yet.</p></section>
+  {% else %}
+  {% if status.error %}
+  <section><h2>Router</h2><p class="bad">{{ status.error }}</p></section>
+  {% endif %}
+
+  <section>
+    <h2>Pipe <span class="muted mono">{{ status.pipe.interface }}</span></h2>
+    {% if status.pipe.peers %}
+    <div class="scroll"><table>
+      <tr><th>Peer</th><th>Endpoint</th><th>Handshake</th><th>Received</th><th>Sent</th></tr>
+      {% for p in status.pipe.peers %}
+      <tr>
+        <td class="mono">{{ p.allowed_ips }}</td>
+        <td class="mono">{{ p.endpoint or "—" }}</td>
+        <td class="{{ 'ok' if p.handshake_age is not none and p.handshake_age < 300 else 'bad' }}">{{ p.handshake_age | age }}</td>
+        <td class="num">{{ p.rx | bytes }}</td>
+        <td class="num">{{ p.tx | bytes }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="muted">No peers configured.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Exits</h2>
+    <p class="muted">Anything not on a list leaves from this server's own IP.</p>
+    {% if status.exits %}
+    <div class="scroll"><table>
+      <tr><th>#</th><th>Name</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th></tr>
+      {% for e in status.exits %}
+      <tr>
+        <td class="num">{{ e.id }}</td>
+        <td>{{ e.name }}</td>
+        <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif e.up %}<span class="ok">up</span>{% else %}<span class="bad">down</span>{% endif %}</td>
+        <td>{{ e.handshake_age | age }}</td>
+        <td class="num">{{ e.rx | bytes }}</td>
+        <td class="num">{{ e.tx | bytes }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="muted">No exits yet.</p>
+    {% endif %}
+  </section>
+
+  <section>
+    <h2>Lists</h2>
+    {% if status.lists %}
+    <div class="scroll"><table>
+      {% set exit_names = {} %}{% for e in status.exits %}{% set _ = exit_names.update({e.id: e.name}) %}{% endfor %}
+      <tr><th>Name</th><th>Exit</th><th>Kill switch</th><th>Entries</th><th>Learned IPs</th></tr>
+      {% for l in status.lists %}
+      <tr>
+        <td><a href="/lists#list-{{ l.id }}">{{ l.name }}</a></td>
+        <td>{{ exit_names.get(l.exit, l.exit) }}</td>
+        <td>{{ "on" if l.when_down == "block" else "off" }}</td>
+        <td class="num">{{ (l.v4 or 0) + (l.v6 or 0) + (l.domains or 0) }}</td>
+        <td class="num">{{ (l.learned4 or 0) + (l.learned6 or 0) }}</td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% else %}
+    <p class="muted">No lists yet.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <p class="muted">
+    Status {{ status_age | age if status_age is not none else "missing" }}
+    · build <span class="mono">{{ build_sha }}</span>
+  </p>
+</main>
+{% endblock %}

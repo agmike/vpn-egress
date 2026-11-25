@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}DNS · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  {% if saved %}
+  <div class="notice">Saved. The blocklist re-merges in a few seconds; reload to see the result.</div>
+  {% endif %}
+  {% if errors %}
+  <div class="notice bad">Not saved:
+    <ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <section>
+    <h2>Blocklists</h2>
+    {% if status %}
+      {% if status.error %}<p class="bad">{{ status.error }}</p>{% endif %}
+      <p class="muted">
+        {{ "{:,}".format(status.blocked) if status.blocked is not none else "?" }} names blocked
+        · last {{ status.mode }} refresh {{ status_age | age }}
+      </p>
+    {% else %}
+      <p class="muted">No refresh has reported yet.</p>
+    {% endif %}
+    <form method="post" action="/dns">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="list-count" id="list-count" value="{{ rows | length }}">
+      <div class="scroll"><table id="lists">
+        <tr><th>Name</th><th>URL</th><th>On</th><th>Entries</th><th></th></tr>
+        {% set by_name = {} %}
+        {% if status %}{% for l in status.lists %}{% set _ = by_name.update({l.name: l}) %}{% endfor %}{% endif %}
+        {% for r in rows %}
+        {% set s = by_name.get(r.name) %}
+        <tr data-saved>
+          <td><input type="text" name="list-{{ loop.index0 }}-name" value="{{ r.name }}" size="14"></td>
+          <td><input type="url" name="list-{{ loop.index0 }}-url" value="{{ r.url }}"></td>
+          <td class="center"><input type="checkbox" name="list-{{ loop.index0 }}-enabled" {{ "checked" if r.enabled }}></td>
+          <td class="num">
+            {% if s %}
+              {% if s.source == "disabled" %}<span class="muted">off</span>
+              {% elif s.source == "failed" %}<span class="bad" title="{{ s.error }}">failed</span>
+              {% else %}{{ "{:,}".format(s.entries) }}{% if s.error %} <span class="warn" title="{{ s.error }}">(cached)</span>{% endif %}{% endif %}
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          <td class="center">
+            <input type="hidden" name="list-{{ loop.index0 }}-remove" value="">
+            <button type="button" class="link" data-remove>Remove</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </table></div>
+      <template id="new-row">
+        <tr>
+          <td><input type="text" data-field="name" placeholder="new-list" size="14"></td>
+          <td><input type="url" data-field="url" placeholder="https://…"></td>
+          <td class="center"><input type="checkbox" data-field="enabled" checked></td>
+          <td><span class="muted">new</span></td>
+          <td class="center"><button type="button" class="link" data-remove>Remove</button></td>
+        </tr>
+      </template>
+      <p><button type="button" id="add-list">Add list</button></p>
+      <p class="muted">Bare domains, wildcard (<span class="mono">*.name</span>), hosts, RPZ and dnsmasq <span class="mono">local=/name/</span> lists all work. A listed name also blocks its subdomains.</p>
+
+      <div class="grid2">
+        <div>
+          <h2>Also block</h2>
+          <textarea name="block" spellcheck="false" placeholder="one domain per line">{{ block }}</textarea>
+        </div>
+        <div>
+          <h2>Never block</h2>
+          <textarea name="allow" spellcheck="false" placeholder="one domain per line">{{ allow }}</textarea>
+        </div>
+      </div>
+      <p><button type="submit" class="primary">Save</button></p>
+    </form>
+  </section>
+</main>
+<script>
+(function () {
+  const table = document.getElementById("lists");
+  const count = document.getElementById("list-count");
+  document.getElementById("add-list").addEventListener("click", function () {
+    const i = parseInt(count.value, 10);
+    const row = document.getElementById("new-row").content.firstElementChild.cloneNode(true);
+    row.querySelectorAll("[data-field]").forEach(function (el) {
+      el.name = "list-" + i + "-" + el.dataset.field;
+    });
+    table.tBodies[0].appendChild(row);
+    count.value = i + 1;
+    row.querySelector("input").focus();
+  });
+  table.addEventListener("click", function (ev) {
+    const btn = ev.target.closest("[data-remove]");
+    if (!btn) return;
+    const row = btn.closest("tr");
+    if (!row.hasAttribute("data-saved")) { row.remove(); return; }
+    const flag = row.querySelector('input[type=hidden][name$="-remove"]');
+    const removing = flag.value !== "on";
+    flag.value = removing ? "on" : "";
+    row.classList.toggle("removed", removing);
+    row.querySelectorAll("input:not([type=hidden])").forEach(function (el) {
+      if (el.type === "checkbox") el.disabled = removing; else el.readOnly = removing;
+    });
+    btn.textContent = removing ? "Undo" : "Remove";
+  });
+})();
+</script>
+{% endblock %}
