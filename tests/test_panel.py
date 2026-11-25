@@ -490,3 +490,76 @@ def test_lists_url_redirects(tmp_path):
     client = signed_in(tmp_path)
     r = client.get("/lists", follow_redirects=False)
     assert r.status_code == 308 and r.headers["location"] == "/routing"
+
+
+# --- pipe ----------------------------------------------------------------------------
+
+
+def pipe_ready(tmp_path):
+    client = signed_in(tmp_path)
+    (tmp_path / "status.json").write_text(
+        json.dumps(
+            {
+                "updated": int(time.time()),
+                "pipe": {
+                    "interface": "awg0",
+                    "managed": True,
+                    "configured": False,
+                    "addresses": ["10.66.0.1/24", "fd66::1/64"],
+                    "endpoint": "egress.example.com:443",
+                    "client_mtu": 1280,
+                    "port": 443,
+                    "peers": [],
+                },
+            }
+        )
+    )
+    token = csrf_of(client.get("/pipe").text)
+    client.post("/pipe/recreate", data={"csrf": token})
+    return client, token
+
+
+def test_pipe_create_and_device_config(tmp_path):
+    from vpn_egress.panel.state import public_key
+
+    client, token = pipe_ready(tmp_path)
+    pipe = state_of(tmp_path)["pipe"]
+    assert pipe["peers"] == [] and pipe["obfuscation"]["I1"].startswith("<b ")
+    r = client.post("/pipe/devices", data={"csrf": token, "name": "Phone"})
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
+    assert "<svg" in r.text and "Download .conf" in r.text
+    conf = r.text.split("<textarea", 1)[1].split(">", 1)[1].split("</textarea>", 1)[0]
+    priv = conf.split("PrivateKey = ", 1)[1].split("\n", 1)[0]
+    peer = state_of(tmp_path)["pipe"]["peers"][0]
+    assert public_key(priv) == peer["public_key"] and "private_key" not in peer
+    assert peer["address"] == "10.66.0.2/32" and peer["address6"] == "fd66::2/128"
+    assert "Endpoint = egress.example.com:443" in conf and "DNS = 10.66.0.1, fd66::1" in conf
+    assert f"PublicKey = {public_key(state_of(tmp_path)['pipe']['private_key'])}" in conf
+    client.post("/pipe/devices", data={"csrf": token, "name": "Laptop"})
+    assert state_of(tmp_path)["pipe"]["peers"][1]["address"] == "10.66.0.3/32"
+    old = peer["public_key"]
+    client.post("/pipe/peers/1/regenerate", data={"csrf": token})
+    assert state_of(tmp_path)["pipe"]["peers"][0]["public_key"] != old
+    client.post("/pipe/peers/2/delete", data={"csrf": token})
+    assert [p["name"] for p in state_of(tmp_path)["pipe"]["peers"]] == ["Phone"]
+    old_server = state_of(tmp_path)["pipe"]["private_key"]
+    client.post("/pipe/recreate", data={"csrf": token})
+    assert state_of(tmp_path)["pipe"]["private_key"] != old_server and len(state_of(tmp_path)["pipe"]["peers"]) == 1
+
+
+def test_pipe_site(tmp_path):
+    from vpn_egress.panel.state import gen_keypair
+
+    client, token = pipe_ready(tmp_path)
+    _, pub = gen_keypair()
+    r = client.post("/pipe/sites", data={"csrf": token, "site_name": "Home", "public_key": "nope", "routes": "x"})
+    assert r.status_code == 400 and "WireGuard key" in r.text and "not an address range" in r.text
+    r = client.post(
+        "/pipe/sites",
+        data={"csrf": token, "site_name": "Home", "public_key": pub, "routes": "0.0.0.0/0, ::/0"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303 and r.headers["location"] == "/pipe/peers/1/config"
+    page = client.get("/pipe/peers/1/config").text
+    assert "this site’s private key" in page and "<svg" not in page
+    assert state_of(tmp_path)["pipe"]["peers"][0]["routes"] == ["0.0.0.0/0", "::/0"]

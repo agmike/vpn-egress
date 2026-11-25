@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from vpn_egress.router import apply, blocklists, dnsmasq, firewall, sources
+from vpn_egress.router import apply, blocklists, dnsmasq, firewall, pipe, sources
 from vpn_egress.router.config import Config, ConfigError
 
 
@@ -309,3 +309,40 @@ def test_expand_merges_sources(tmp_path, monkeypatch):
     info = apply.expand(v, cache)
     assert v["lists"][0]["v4"] == ["198.51.100.0/24", "203.0.113.7/32"]  # collapsed
     assert info[7][0]["name"] == "JP" and info[7][0]["entries"] == 2
+
+
+def test_pipe_validate_and_render():
+    c = cfg(EGRESS_PIPE_MANAGE="true", EGRESS_PIPE_PORT="443", EGRESS_PIPE_ADDRESSES="10.66.0.1/24,fd66::1/64")
+    good = {
+        "private_key": key(),
+        "obfuscation": {"Jc": 5, "S1": 30, "H1": "100000-200000", "I1": "<b 0xc300000001><r 8><t>"},
+        "peers": [
+            {"id": 1, "name": "Phone", "public_key": key(), "address": "10.66.0.2/32", "address6": "fd66::2/128"},
+            {
+                "id": 2,
+                "name": "Home",
+                "kind": "site",
+                "public_key": key(),
+                "address": "10.66.0.3/32",
+                "routes": ["0.0.0.0/0", "::/0"],
+            },
+        ],
+    }
+    v = pipe.validate(good, c)
+    conf = pipe.render(v, c)
+    assert "ListenPort = 443" in conf and "H1 = 100000-200000" in conf
+    assert "AllowedIPs = 10.66.0.2/32, fd66::2/128" in conf
+    assert "AllowedIPs = 10.66.0.3/32, 0.0.0.0/0, ::/0" in conf
+    for bad in (
+        {"obfuscation": {"Jc": "seven"}},
+        {"obfuscation": {"I1": "<b 0x00>\nPostUp = rm -rf /"}},
+        {"obfuscation": {"Xx": 1}},
+        {"peers": [{"id": 1, "name": "P", "public_key": key(), "address": "192.0.2.5/32"}]},
+        {"peers": [{"id": 1, "name": "P", "public_key": key(), "address": "10.66.0.0/24"}]},
+        {"private_key": "short"},
+    ):
+        with pytest.raises(pipe.PipeError):
+            pipe.validate({**good, **bad}, c)
+    assert c.pipe_manage and c.pipe_port == 443
+    with pytest.raises(ConfigError):
+        cfg(EGRESS_PIPE_ENDPOINT="no port")

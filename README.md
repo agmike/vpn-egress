@@ -27,6 +27,9 @@ picked per domain or IP list in a small web panel.
   the rest goes; private and local destinations always stay local.
 - **DNS:** dnsmasq on the tunnel with blocklists edited in the panel; plain DNS from the
   tunnel is redirected to it and DNS-over-TLS/QUIC is refused.
+- **Pipe (optional):** the router can own the tunnel clients arrive on: server key and
+  AmneziaWG obfuscation (**Recreate** makes new ones), devices with generated keys whose config
+  is shown once as file, text and QR code, and sites (routers that keep their own key).
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
 ## How it runs
@@ -89,6 +92,10 @@ Router:
 | `EGRESS_STATE_UID` | `10300` | owner of status files (the panel's uid) |
 | `EGRESS_APPLY_INTERVAL` / `EGRESS_BLOCKLIST_INTERVAL` / `EGRESS_SOURCE_INTERVAL` | `60` / `86400` / `86400` | seconds |
 | `EGRESS_GEOIP_URL` / `EGRESS_ASN_URL` | MetaCubeX/meta-rules-dat | URL templates with `{name}` / `{asn}` |
+| `EGRESS_PIPE_MANAGE` | `false` | create and configure the pipe interface from the panel's state |
+| `EGRESS_PIPE_PORT` / `EGRESS_PIPE_MTU` | `51820` / `1380` | |
+| `EGRESS_PIPE_ADDRESSES` | `10.66.0.1/24,fd66::1/64` | server addresses; peers get addresses from these subnets |
+| `EGRESS_PIPE_ENDPOINT` / `EGRESS_PIPE_CLIENT_MTU` | — / `1280` | `host:port` and MTU written into client configs |
 
 Panel: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
 `OIDC_ALLOWED_GROUPS` (comma-separated; the provider must send a `groups` claim),

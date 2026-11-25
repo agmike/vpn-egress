@@ -248,3 +248,118 @@ def list_from_form(form, exits: list[dict], errors: list[str]) -> dict:
         "resolve_via_exit": form.get("resolve_via_exit") == "on",
         "entries": parse_entries(form.get("entries", ""), errors),
     }
+
+
+# --- the pipe --------------------------------------------------------------------
+
+# Looks like the start of a QUIC Initial packet (good on UDP 443).
+DEFAULT_I1 = "<b 0xc300000001><b 0x08><r 8><b 0x0000><b 0x44d0><r 1200>"
+OBFUSCATION_KEYS = ("Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4", "I1", "I2", "I3", "I4", "I5")
+
+
+def gen_keypair() -> tuple[str, str]:
+    import base64
+
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    key = X25519PrivateKey.generate()
+    priv = key.private_bytes(ser.Encoding.Raw, ser.PrivateFormat.Raw, ser.NoEncryption())
+    pub = key.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw)
+    return base64.b64encode(priv).decode(), base64.b64encode(pub).decode()
+
+
+def public_key(private: str) -> str:
+    import base64
+
+    from cryptography.hazmat.primitives import serialization as ser
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    key = X25519PrivateKey.from_private_bytes(base64.b64decode(private))
+    return base64.b64encode(key.public_key().public_bytes(ser.Encoding.Raw, ser.PublicFormat.Raw)).decode()
+
+
+def gen_obfuscation() -> dict:
+    """Random AmneziaWG 2.0 parameters: junk packets, padding, header ranges."""
+    import secrets
+
+    r = secrets.SystemRandom()
+    jmin = r.randint(40, 80)
+    while True:
+        s1, s2 = r.randint(20, 120), r.randint(20, 120)
+        if s1 != s2 and s1 + 56 != s2:
+            break
+    starts = sorted(r.sample(range(16, 250), 4))
+    heads = []
+    for st in starts:
+        a = st * (1 << 24) + r.randint(0, 1 << 20)
+        heads.append(f"{a}-{a + r.randint(1 << 22, 1 << 23)}")
+    return {
+        "Jc": r.randint(4, 7),
+        "Jmin": jmin,
+        "Jmax": r.randint(jmin + 200, jmin + 600),
+        "S1": s1,
+        "S2": s2,
+        "S3": r.randint(16, 48),
+        "S4": r.randint(4, 16),
+        "H1": heads[0],
+        "H2": heads[1],
+        "H3": heads[2],
+        "H4": heads[3],
+        "I1": DEFAULT_I1,
+    }
+
+
+def allocate_addresses(pipe: dict, server_addresses: list[str]) -> tuple[str | None, str | None]:
+    """The lowest free host (from .2) in the pipe's IPv4 subnet, and the IPv6
+    address with the same digits (10.66.0.11 → fd66::11)."""
+    import ipaddress
+
+    ifaces = [ipaddress.ip_interface(a) for a in server_addresses]
+    used = {i.ip for i in ifaces}
+    for p in pipe.get("peers", []):
+        for field in ("address", "address6"):
+            if p.get(field):
+                used.add(ipaddress.ip_interface(p[field]).ip)
+    v4 = next((i for i in ifaces if i.version == 4), None)
+    v6 = next((i for i in ifaces if i.version == 6), None)
+    if v4 is None:
+        return None, None
+    for n in range(2, v4.network.num_addresses - 1):
+        a4 = v4.network.network_address + n
+        a6 = v6.network.network_address + int(str(n), 16) if v6 else None
+        if a4 not in used and (a6 is None or a6 not in used):
+            return f"{a4}/32", (f"{a6}/128" if a6 else None)
+    return None, None
+
+
+def render_client_config(pipe: dict, peer: dict, pipe_status: dict, private_key: str | None) -> str:
+    """A device's full config (with its private key), or a site's template."""
+    import ipaddress
+
+    site = peer.get("kind") == "site"
+    addrs = [a for a in (peer.get("address"), peer.get("address6")) if a]
+    dns = [str(ipaddress.ip_interface(a).ip) for a in pipe_status.get("addresses", [])]
+    lines = ["[Interface]", f"PrivateKey = {private_key or '<this site’s private key>'}"]
+    if addrs:
+        lines.append(f"Address = {', '.join(addrs)}")
+    if not site and dns:
+        lines.append(f"DNS = {', '.join(dns)}")
+    if not site:
+        lines.append(f"MTU = {pipe_status.get('client_mtu', 1280)}")
+    lines += [f"{k} = {v}" for k, v in pipe.get("obfuscation", {}).items()]
+    lines += [
+        "",
+        "[Peer]",
+        f"PublicKey = {public_key(pipe['private_key'])}",
+        f"Endpoint = {pipe_status.get('endpoint') or '<server:port>'}",
+        "AllowedIPs = 0.0.0.0/0, ::/0",
+        "PersistentKeepalive = 25",
+    ]
+    if site:
+        lines = [
+            "# Site config: route the networks behind this site into the tunnel (no NAT needed);",
+            "# replies come back on their own. Use the site's own key pair.",
+            *lines,
+        ]
+    return "\n".join(lines) + "\n"

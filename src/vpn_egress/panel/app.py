@@ -21,13 +21,18 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .state import (
     LABEL_RE,
+    allocate_addresses,
     dns_config,
     dns_from_form,
     exit_from_form,
+    gen_keypair,
+    gen_obfuscation,
     list_from_form,
     next_id,
     parse_wg_conf,
+    public_key,
     read_json,
+    render_client_config,
     save_section,
 )
 
@@ -583,6 +588,183 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             save_section(settings.state_dir, "lists", [x for x in lists if x is not l])
             flash(request, f"Deleted {l['name']}.")
         return RedirectResponse("/routing", status_code=303)
+
+    # --- the pipe --------------------------------------------------------------
+
+    def pipe_status() -> dict:
+        return (read_json(settings.state_dir / "status.json") or {}).get("pipe") or {}
+
+    def pipe_page(request: Request, user: dict, errors=None, values=None, status_code=200):
+        state = load_state()
+        pipe = state.get("pipe")
+        ps = pipe_status()
+        runtime = {p.get("public_key"): p for p in ps.get("peers", [])}
+        peers = []
+        for p in (pipe or {}).get("peers", []):
+            peers.append({**p, "runtime": runtime.get(p.get("public_key"))})
+        return TEMPLATES.TemplateResponse(
+            request,
+            "pipe.html",
+            {
+                "user": user,
+                "page": "pipe",
+                "csrf": csrf_token(request),
+                "pipe": pipe,
+                "server_key": public_key(pipe["private_key"]) if pipe else ps.get("public_key"),
+                "ps": ps,
+                "peers": peers,
+                "unmanaged_peers": [] if pipe else ps.get("peers", []),
+                "errors": errors or [],
+                "values": values or {},
+                "flash": request.session.pop("flash", None),
+            },
+            status_code=status_code,
+        )
+
+    def config_page(request: Request, user: dict, peer: dict, conf: str, secret: bool):
+        import segno
+
+        qr = segno.make(conf, error="l").svg_inline(scale=3, dark="#000", light="#fff") if secret else None
+        resp = TEMPLATES.TemplateResponse(
+            request,
+            "pipe_config.html",
+            {"user": user, "page": "pipe", "peer": peer, "conf": conf, "qr": qr, "secret": secret},
+        )
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
+    @app.get("/pipe", response_class=HTMLResponse)
+    async def pipe_get(request: Request):
+        user = current_user(request)
+        if user is None:
+            return RedirectResponse("/", status_code=303)
+        return pipe_page(request, user)
+
+    @app.post("/pipe/recreate")
+    async def pipe_recreate(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        pipe = load_state().get("pipe") or {"peers": []}
+        priv, _ = gen_keypair()
+        pipe.update(private_key=priv, obfuscation=gen_obfuscation())
+        save_section(settings.state_dir, "pipe", pipe)
+        flash(request, "New server key and obfuscation saved. Every peer needs a new config.")
+        return RedirectResponse("/pipe", status_code=303)
+
+    @app.post("/pipe/devices", response_class=HTMLResponse)
+    async def pipe_add_device(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        state = load_state()
+        pipe = state.get("pipe")
+        name = (form.get("name") or "").strip()
+        errors = [] if LABEL_RE.match(name) else ["Name must be 1–40 characters"]
+        if not pipe:
+            errors.append("Create the pipe first")
+        a4, a6 = allocate_addresses(pipe or {}, pipe_status().get("addresses", [])) if pipe else (None, None)
+        if pipe and not a4:
+            errors.append("No free address in the pipe subnet")
+        if errors:
+            return pipe_page(request, user, errors, {"name": name}, 400)
+        priv, pub = gen_keypair()
+        peer = {
+            "id": next_id(pipe["peers"]) or len(pipe["peers"]) + 1,
+            "name": name,
+            "kind": "device",
+            "public_key": pub,
+            "address": a4,
+            "address6": a6,
+            "created": int(time.time()),
+        }
+        pipe["peers"].append(peer)
+        save_section(settings.state_dir, "pipe", pipe)
+        return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), priv), True)
+
+    @app.post("/pipe/sites", response_class=HTMLResponse)
+    async def pipe_add_site(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        import base64
+        import ipaddress
+
+        state = load_state()
+        pipe = state.get("pipe")
+        name = (form.get("site_name") or "").strip()
+        pub = (form.get("public_key") or "").strip()
+        errors = [] if LABEL_RE.match(name) else ["Name must be 1–40 characters"]
+        try:
+            assert len(base64.b64decode(pub, validate=True)) == 32
+        except Exception:
+            errors.append("Public key must be a WireGuard key (44 characters, base64)")
+        routes = [r.strip() for r in (form.get("routes") or "").replace(",", "\n").splitlines() if r.strip()]
+        for r in routes:
+            try:
+                ipaddress.ip_network(r, strict=False)
+            except ValueError:
+                errors.append(f"“{r}” is not an address range")
+        if not pipe:
+            errors.append("Create the pipe first")
+        elif any(p.get("public_key") == pub for p in pipe["peers"]):
+            errors.append("A peer with this public key exists")
+        if errors:
+            return pipe_page(
+                request, user, errors, {"site_name": name, "public_key": pub, "routes": form.get("routes", "")}, 400
+            )
+        a4, a6 = allocate_addresses(pipe, pipe_status().get("addresses", []))
+        peer = {
+            "id": next_id(pipe["peers"]) or len(pipe["peers"]) + 1,
+            "name": name,
+            "kind": "site",
+            "public_key": pub,
+            "address": a4,
+            "address6": a6,
+            "routes": routes or ["0.0.0.0/0", "::/0"],
+            "created": int(time.time()),
+        }
+        pipe["peers"].append(peer)
+        save_section(settings.state_dir, "pipe", pipe)
+        return RedirectResponse(f"/pipe/peers/{peer['id']}/config", status_code=303)
+
+    @app.get("/pipe/peers/{peer_id}/config", response_class=HTMLResponse)
+    async def pipe_site_config(request: Request, peer_id: int):
+        user = current_user(request)
+        if user is None:
+            return RedirectResponse("/", status_code=303)
+        pipe = load_state().get("pipe") or {}
+        peer = find(pipe.get("peers", []), peer_id)
+        if peer is None or peer.get("kind") != "site":
+            return RedirectResponse("/pipe", status_code=303)
+        return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), None), False)
+
+    @app.post("/pipe/peers/{peer_id}/regenerate", response_class=HTMLResponse)
+    async def pipe_regenerate(request: Request, peer_id: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        pipe = load_state().get("pipe") or {}
+        peer = find(pipe.get("peers", []), peer_id)
+        if peer is None or peer.get("kind") != "device":
+            return RedirectResponse("/pipe", status_code=303)
+        priv, pub = gen_keypair()
+        peer["public_key"] = pub
+        save_section(settings.state_dir, "pipe", pipe)
+        return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), priv), True)
+
+    @app.post("/pipe/peers/{peer_id}/delete")
+    async def pipe_delete(request: Request, peer_id: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        pipe = load_state().get("pipe") or {}
+        peer = find(pipe.get("peers", []), peer_id)
+        if peer:
+            pipe["peers"] = [p for p in pipe["peers"] if p is not peer]
+            save_section(settings.state_dir, "pipe", pipe)
+            flash(request, f"Deleted {peer['name']}.")
+        return RedirectResponse("/pipe", status_code=303)
 
     @app.get("/lists", include_in_schema=False)
     async def lists_moved():

@@ -47,6 +47,12 @@ class Config:
     source_interval: int
     geoip_url: str
     asn_url: str
+    pipe_manage: bool
+    pipe_port: int
+    pipe_addresses: tuple
+    pipe_mtu: int
+    pipe_endpoint: str
+    pipe_client_mtu: int
 
     @property
     def run_dir(self) -> Path:
@@ -65,6 +71,15 @@ class Config:
         tool = get("EGRESS_PIPE_TOOL", "awg")
         if tool not in ("awg", "wg"):
             raise ConfigError("EGRESS_PIPE_TOOL must be awg or wg")
+        addresses = []
+        for a in get("EGRESS_PIPE_ADDRESSES", "10.66.0.1/24,fd66::1/64").split(","):
+            try:
+                addresses.append(ipaddress.ip_interface(a.strip()))
+            except ValueError as exc:
+                raise ConfigError(f"EGRESS_PIPE_ADDRESSES: {a!r} is not address/prefix") from exc
+        endpoint = env.get("EGRESS_PIPE_ENDPOINT", "").strip()
+        if endpoint and not re.fullmatch(r"[A-Za-z0-9.-]+:[0-9]{1,5}|\[[0-9a-fA-F:]+\]:[0-9]{1,5}", endpoint):
+            raise ConfigError("EGRESS_PIPE_ENDPOINT must be host:port")
         upstreams = []
         for u in get("EGRESS_DNS_UPSTREAMS", "9.9.9.9,149.112.112.112").split(","):
             try:
@@ -87,6 +102,12 @@ class Config:
                 source_interval=int(get("EGRESS_SOURCE_INTERVAL", "86400")),
                 geoip_url=_template(get("EGRESS_GEOIP_URL", GEOIP_URL), "{name}"),
                 asn_url=_template(get("EGRESS_ASN_URL", ASN_URL), "{asn}"),
+                pipe_manage=_bool(get("EGRESS_PIPE_MANAGE", "false")),
+                pipe_port=int(get("EGRESS_PIPE_PORT", "51820")),
+                pipe_addresses=tuple(addresses),
+                pipe_mtu=int(get("EGRESS_PIPE_MTU", "1380")),
+                pipe_endpoint=endpoint,
+                pipe_client_mtu=int(get("EGRESS_PIPE_CLIENT_MTU", "1280")),
             )
         except ValueError as exc:
             raise ConfigError(f"bad numeric setting: {exc}") from exc

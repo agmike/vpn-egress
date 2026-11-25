@@ -11,6 +11,7 @@ import time
 import traceback
 
 from . import blocklists, firewall
+from . import pipe as pipe_mod
 from .apply import StateError, apply, required_sources, validate
 from .config import Config, ConfigError
 from .dnsmasq import Dnsmasq
@@ -52,10 +53,11 @@ def main() -> int:
 
     nft_apply(firewall.render(cfg))
     last_routes: list[str] = []
+    last_pipe: list[str] = []
 
     def do_apply(reason: str) -> None:
         try:
-            status = apply(cfg, dns, last_routes, cache)
+            status = apply(cfg, dns, last_routes, cache, last_pipe)
             if status["error"]:
                 log(f"apply ({reason}): {status['error']}")
         except Exception:  # keep running; the next tick retries
@@ -89,6 +91,11 @@ def main() -> int:
             dns.start()
         mtime = state_file.stat().st_mtime if state_file.exists() else None
         now = time.monotonic()
+        if cfg.pipe_manage and last_pipe and not pipe_mod.exists(cfg):
+            log("pipe interface missing; recreating")
+            last_pipe.clear()
+            do_apply("pipe missing")
+            last_apply = now
         if mtime != last_mtime:
             last_mtime = mtime
             refresh_sources(max_age=float("inf"))  # only what's missing

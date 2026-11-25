@@ -65,6 +65,7 @@ import tempfile
 import time
 from typing import Protocol
 
+from . import pipe as pipe_mod
 from .config import Config
 from .firewall import RETURN_MARK
 from .sources import Source, SourceCache
@@ -584,40 +585,24 @@ def sync_dnsmasq(cfg: Config, state: dict, exit_up: dict[int, bool], dns: Dns) -
 # --- status / main -------------------------------------------------------------------
 
 
-def pipe_status(cfg: Config) -> dict:
-    peers = []
-    out = run(cfg.pipe_tool, "show", cfg.pipe_iface, "dump", check=False).stdout.splitlines()
-    for line in out[1:]:  # the first line is the interface itself
-        f = line.split("\t")
-        if len(f) < 8:
-            continue
-        hs = int(f[4])
-        peers.append(
-            {
-                "public_key": f[0],
-                "endpoint": None if f[2] == "(none)" else f[2],
-                "allowed_ips": f[3],
-                "handshake_age": int(time.time()) - hs if hs else None,
-                "rx": int(f[5]),
-                "tx": int(f[6]),
-            }
-        )
-    return {"interface": cfg.pipe_iface, "peers": peers}
-
-
-def apply(cfg: Config, dns: Dns, last_routes: list[str], cache: SourceCache | None = None) -> dict:
+def apply(
+    cfg: Config, dns: Dns, last_routes: list[str], cache: SourceCache | None = None, last_pipe: list[str] | None = None
+) -> dict:
     status = {"updated": int(time.time()), "error": None, "exits": [], "lists": []}
     state_file = cfg.state_dir / "state.json"
     try:
         raw = json.loads(state_file.read_text()) if state_file.exists() else {}
         state = validate(raw)
-    except (StateError, json.JSONDecodeError) as exc:
+        pipe = pipe_mod.validate(raw["pipe"], cfg) if cfg.pipe_manage and raw.get("pipe") else None
+    except (StateError, pipe_mod.PipeError, json.JSONDecodeError) as exc:
         # Keep the host as it is; tell the panel why nothing changed.
         status["error"] = f"state not applied: {exc}"
-        status["pipe"] = pipe_status(cfg)
+        status["pipe"] = pipe_mod.status(cfg, None)
         write_json(cfg.state_dir / "status.json", status, cfg.state_uid)
         return status
 
+    if pipe:
+        pipe_mod.apply(pipe, cfg, last_pipe if last_pipe is not None else [])
     sources_info = expand(state, cache) if cache else {}
     enabled = {eid for eid, ex in state["exits"].items() if ex["enabled"]}
     for iface in existing_exits() - {f"{EXIT_PREFIX}{eid}" for eid in enabled}:
@@ -677,6 +662,6 @@ def apply(cfg: Config, dns: Dns, last_routes: list[str], cache: SourceCache | No
             }
         )
     status["default"] = {"exit": state["default"]["exit"], "when_down": state["default"]["when_down"]}
-    status["pipe"] = pipe_status(cfg)
+    status["pipe"] = pipe_mod.status(cfg, pipe)
     write_json(cfg.state_dir / "status.json", status, cfg.state_uid)
     return status

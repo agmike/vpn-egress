@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}{{ peer.name }} · Pipe · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <section>
+    <h2>{{ peer.name }}</h2>
+    {% if secret %}
+    <div class="notice bad">This config contains the device's private key and is shown only now. Save it or scan it before leaving the page.</div>
+    <div class="qr">{{ qr | safe }}</div>
+    <p class="muted">Scan with the AmneziaWG app (the Amnezia VPN app ignores the DNS line).</p>
+    {% else %}
+    <p class="muted">Template for a site: fill in its own private key.</p>
+    {% endif %}
+    <textarea readonly spellcheck="false" rows="22">{{ conf }}</textarea>
+    <p>
+      <a class="button primary" download="{{ peer.name | replace(' ', '-') }}.conf" href="data:text/plain;charset=utf-8,{{ conf | urlencode }}">Download .conf</a>
+      <a class="button" href="/pipe">Back to the pipe</a>
+    </p>
+  </section>
+</main>
+{% endblock %}

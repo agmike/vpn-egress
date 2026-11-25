@@ -115,7 +115,8 @@
       <tr><td class="mono">NETFLIX</td><td>a service's IP ranges: CLOUDFLARE, CLOUDFRONT, FACEBOOK, FASTLY, GOOGLE, NETFLIX, TELEGRAM, TOR, TWITTER</td></tr>
       <tr><td class="mono">AS2906</td><td>a network's announced ranges (ASN)</td></tr>
       <tr><td class="mono">https://…/list.txt</td><td>a remote list of domains or ranges, refreshed daily (plain, hosts, dnsmasq, RPZ or JSON)</td></tr>
-      <tr><td class="mono">203.0.113.0/24</td><td>an IPv4 or IPv6 address or range</td></tr>
+      <tr><td class="mono">203.0.113.0/24</td><td>an IPv4 address or range (<span class="mono">203.0.113.7</span>)</td></tr>
+      <tr><td class="mono">2001:db8::/32</td><td>an IPv6 address or range (<span class="mono">2001:db8::7</span>; no brackets)</td></tr>
       <tr><td class="mono"># streaming CDNs</td><td>a comment, on its own line or after an entry</td></tr>
     </table>
     <p class="muted">Put specific lists above broad ones: services and domains before countries. Domains route by the addresses they resolve to, so a site may need a reload after it's added, and other sites sharing a CDN address with a listed one go the same way; to block a name itself, use <a href="/dns">DNS</a>. GeoIP is where addresses are registered: anycast CDNs (Cloudflare, Google) count as US wherever they serve from.</p>
