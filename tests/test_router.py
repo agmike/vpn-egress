@@ -194,6 +194,8 @@ def test_blocklist_config_validation():
         {"lists": [{"name": "ads", "url": "https://lists.example/ads.txt"}], "block": ["Blocked.Example."], "allow": []}
     )
     assert ok["block"] == ["blocked.example"] and ok["lists"][0]["enabled"] is True
+    ok = blocklists.validate({"block": ["# trackers", "Blocked.Example.  # old", "", "*.wild.example"]})
+    assert ok["block"] == ["blocked.example", "wild.example"]
     for bad in (
         {"lists": [{"name": "Ads", "url": "https://x.example/a"}]},
         {"lists": [{"name": "ads", "url": "http://x.example/a"}]},

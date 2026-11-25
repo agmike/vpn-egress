@@ -47,9 +47,13 @@ class ConfigError(ValueError):
 
 
 def norm_domain(value) -> str | None:
+    """A domain from a panel line ("# comments" allowed); "" for a blank or
+    comment-only line, None if it isn't a domain."""
     if not isinstance(value, str):
         return None
-    d = value.strip().lower().rstrip(".")
+    d = value.split("#", 1)[0].strip().lower().removeprefix("*.").rstrip(".")
+    if not d:
+        return ""
     return d if DOMAIN_RE.match(d) else None
 
 
@@ -75,14 +79,17 @@ def validate(config) -> dict:
     result = {"lists": out}
     for key in ("block", "allow"):
         values = config.get(key, [])
-        if not isinstance(values, list) or len(values) > MAX_DOMAINS:
-            raise ConfigError(f"{key} must be a list of at most {MAX_DOMAINS}")
+        if not isinstance(values, list) or len(values) > 2 * MAX_DOMAINS:
+            raise ConfigError(f"{key} must be a list of at most {2 * MAX_DOMAINS} lines")
         domains = []
         for v in values:
             d = norm_domain(v)
             if d is None:
                 raise ConfigError(f"{key}: bad domain {v!r}")
-            domains.append(d)
+            if d:
+                domains.append(d)
+        if len(domains) > MAX_DOMAINS:
+            raise ConfigError(f"{key}: at most {MAX_DOMAINS} domains")
         result[key] = sorted(set(domains))
     return result
 

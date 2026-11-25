@@ -182,7 +182,7 @@ def test_dns_save_keeps_other_sections(tmp_path):
     state = json.loads((tmp_path / "state.json").read_text())
     assert state["exits"] == [{"id": 1}]
     assert state["dns"]["lists"][1] == {"name": "hagezi-doh", "url": "https://example.org/doh.txt", "enabled": False}
-    assert state["dns"]["block"] == ["ads.example.com", "blocked.example.net"]
+    assert state["dns"]["block"] == ["Blocked.Example.net.", "", "ads.example.com # note"]
 
 
 def test_dns_remove_row(tmp_path):
@@ -431,3 +431,21 @@ def test_exit_dns_flag_and_no_groups_footer(tmp_path):
     page = client.get("/lists").text
     assert 'data-dns="yes"' in page and 'data-dns="no"' in page and "Use exit DNS" in page
     assert "admins" not in client.get("/").text
+
+
+def test_add_buttons_and_collapsed_lists(tmp_path):
+    client = signed_in(tmp_path)
+    add_exit(client)
+    token = csrf_of(client.get("/lists").text)
+    client.post(
+        "/lists/add", data={"csrf": token, "name": "ip-check", "exit": "1", "kill_switch": "on", "entries": "ipify.org"}
+    )
+    page = client.get("/lists").text
+    assert 'data-open="#new-list"' in page and 'id="new-list" hidden' in page
+    assert 'data-open="#edit-1"' in page and 'id="edit-1" hidden' in page
+    assert "→ provider-nl" in page and "kill switch on" in page
+    r = client.post("/lists/add", data={"csrf": token, "name": "", "exit": "1", "entries": ""})
+    assert 'id="new-list" hidden' not in r.text  # errors keep the form open
+    exits = client.get("/exits").text
+    assert 'data-open="#new-exit"' in exits and 'id="new-exit" hidden' in exits
+    assert "Add blocklist" in client.get("/dns").text

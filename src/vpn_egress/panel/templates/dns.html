@@ -59,7 +59,7 @@
           <td class="center"><button type="button" class="link" data-remove>Remove</button></td>
         </tr>
       </template>
-      <p><button type="button" id="add-list">Add list</button></p>
+      <p><button type="button" id="add-list">Add blocklist</button></p>
       <p class="muted">Bare domains, wildcard (<span class="mono">*.name</span>), hosts, RPZ and dnsmasq <span class="mono">local=/name/</span> lists all work. A listed name also blocks its subdomains.</p>
 
       <div class="grid2">
@@ -72,6 +72,7 @@
           <textarea name="allow" spellcheck="false" placeholder="one domain per line">{{ allow }}</textarea>
         </div>
       </div>
+      <p class="muted">One domain per line; it also covers its subdomains (<span class="mono">*.</span> is optional). <span class="mono"># comments</span> on their own line or after a domain.</p>
       <p><button type="submit" class="primary">Save</button></p>
     </form>
   </section>

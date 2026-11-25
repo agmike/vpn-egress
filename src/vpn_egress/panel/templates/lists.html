@@ -25,11 +25,19 @@
   <section><p>Add an <a href="/exits">exit</a> first.</p></section>
   {% endif %}
 
+  {% set exit_names = {} %}{% for e in exits %}{% set _ = exit_names.update({e.id: e.name}) %}{% endfor %}
   {% for l in lists %}
-  <section id="list-{{ l.id }}">
+  {% set s = l.status %}
+  <section class="item" id="list-{{ l.id }}">
     <div class="cardhead">
-      <h2>{{ loop.index }}. {{ l.name }}</h2>
+      <div class="summary">
+        <b>{{ loop.index }}. {{ l.name }}</b>
+        <span class="muted">→ {{ exit_names.get(l.exit, "?") }}
+          · kill switch {{ "on" if l.when_down == "block" else "off" }}{% if l.resolve_via_exit %} · exit DNS{% endif %}
+          {% if s %}{% set r = s.v4 + s.v6 %}{% set n = s.learned4 + s.learned6 %}· {{ s.domains }} domain{{ "s" if s.domains != 1 }}, {{ r }} range{{ "s" if r != 1 }} · {{ n }} IP{{ "s" if n != 1 }} learned{% endif %}</span>
+      </div>
       <div class="actions">
+        <button type="button" class="link" data-open="#edit-{{ l.id }}" {{ "hidden" if l.errors }}>Edit</button>
         <form method="post" action="/lists/{{ l.id }}/move"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="dir" value="up">
           <button type="submit" class="link" {{ "disabled" if loop.first }} title="Higher priority">↑</button></form>
         <form method="post" action="/lists/{{ l.id }}/move"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="dir" value="down">
@@ -38,25 +46,26 @@
           <button type="submit" class="link">Delete</button></form>
       </div>
     </div>
-    {% if l.errors %}<div class="notice bad">Not saved:<ul>{% for e in l.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
-    {% set s = l.status %}
-    {% if s %}<p class="muted">{{ s.v4 }} IPv4 · {{ s.v6 }} IPv6 · {{ s.domains }} domains · {{ s.learned4 + s.learned6 }} IPs learned from DNS</p>{% endif %}
-    <form method="post" action="/lists/{{ l.id }}/save">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      {{ list_fields(l, exits) }}
-      <p><button type="submit" class="primary">Save</button></p>
-    </form>
+    <div class="editor" id="edit-{{ l.id }}" {{ "hidden" if not l.errors }}>
+      {% if l.errors %}<div class="notice bad">Not saved:<ul>{% for e in l.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+      <form method="post" action="/lists/{{ l.id }}/save">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {{ list_fields(l, exits) }}
+        <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
+      </form>
+    </div>
   </section>
   {% endfor %}
 
   {% if exits %}
-  <section id="new-list">
-    <h2>Add list</h2>
+  <p><button type="button" class="primary" data-open="#new-list" {{ "hidden" if new.errors }}>Add list</button></p>
+  <section id="new-list" {{ "hidden" if not new.errors }}>
+    <h2>New list</h2>
     {% if new.errors %}<div class="notice bad">Not saved:<ul>{% for e in new.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
     <form method="post" action="/lists/add">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       {{ list_fields(new, exits) }}
-      <p><button type="submit" class="primary">Add list</button></p>
+      <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
     </form>
   </section>
   {% endif %}

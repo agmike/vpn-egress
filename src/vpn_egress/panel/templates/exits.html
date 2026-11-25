@@ -46,14 +46,15 @@
     {% endif %}
   </section>
 
-  <section>
-    <h2>Add exit</h2>
+  <p><button type="button" class="primary" data-open="#new-exit" {{ "hidden" if values }}>Add exit</button></p>
+  <section id="new-exit" {{ "hidden" if not values }}>
+    <h2>New exit</h2>
     <form method="post" action="/exits/add">
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <p><input type="text" name="name" placeholder="name, e.g. NL 1" value="{{ values.name or '' }}" style="max-width: 280px"></p>
       <textarea name="conf" spellcheck="false" placeholder="Paste a WireGuard .conf from Proton, Nord, …"></textarea>
       <p class="muted">The private key stays on this server and is never shown again. IPv6 is used when the config has an IPv6 address.</p>
-      <p><button type="submit" class="primary">Add exit</button></p>
+      <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
     </form>
   </section>
 </main>

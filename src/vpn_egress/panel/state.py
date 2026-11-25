@@ -53,18 +53,24 @@ def dns_config(state_dir: Path) -> tuple[dict, str]:
 
 
 def parse_domains(text: str, what: str, errors: list[str]) -> list[str]:
-    out = []
+    """Check each line; return the lines as typed (comments and single blank
+    lines kept)."""
+    lines: list[str] = []
+    count = 0
     for raw in text.splitlines():
-        d = raw.split("#", 1)[0].strip().lower().rstrip(".")
-        if not d:
-            continue
-        if DOMAIN_RE.match(d):
-            out.append(d)
-        else:
-            errors.append(f"{what}: “{raw.strip()}” is not a domain name")
-    if len(out) > MAX_DOMAINS:
+        line = raw.rstrip()
+        d = line.split("#", 1)[0].strip().lower().removeprefix("*.").rstrip(".")
+        if d:
+            count += 1
+            if not DOMAIN_RE.match(d):
+                errors.append(f"{what}: “{line.strip()}” is not a domain name")
+        if line or (lines and lines[-1]):
+            lines.append(line)
+    while lines and not lines[-1]:
+        lines.pop()
+    if count > MAX_DOMAINS:
         errors.append(f"{what}: at most {MAX_DOMAINS} domains")
-    return sorted(set(out))
+    return lines
 
 
 def dns_from_form(form) -> tuple[dict, list[dict], list[str]]:
