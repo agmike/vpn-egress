@@ -313,9 +313,9 @@ def test_add_exit_bad_conf_is_not_echoed(tmp_path):
 def test_exit_toggle_replace_and_guarded_delete(tmp_path):
     client = signed_in(tmp_path)
     add_exit(client)
-    token = csrf_of(client.get("/lists").text)
+    token = csrf_of(client.get("/routing").text)
     client.post(
-        "/lists/add",
+        "/routing/add",
         data={
             "csrf": token,
             "name": "ip-check",
@@ -332,7 +332,7 @@ def test_exit_toggle_replace_and_guarded_delete(tmp_path):
     r = client.post("/exits/1/delete", data={"csrf": token})
     assert len(state_of(tmp_path)["exits"]) == 1  # still used by ip-check
     assert "used by ip-check" in r.text
-    client.post("/lists/1/delete", data={"csrf": token})
+    client.post("/routing/1/delete", data={"csrf": token})
     client.post("/exits/1/delete", data={"csrf": token})
     assert state_of(tmp_path)["exits"] == []
 
@@ -340,10 +340,10 @@ def test_exit_toggle_replace_and_guarded_delete(tmp_path):
 def test_lists_add_save_move(tmp_path):
     client = signed_in(tmp_path)
     add_exit(client)
-    token = csrf_of(client.get("/lists").text)
+    token = csrf_of(client.get("/routing").text)
     for name, entries in (("first", "a.example"), ("second", "203.0.113.0/24\n2001:DB8::/32\n*.B.example.")):
         r = client.post(
-            "/lists/add",
+            "/routing/add",
             data={"csrf": token, "name": name, "exit": "1", "kill_switch": "", "entries": entries},
             follow_redirects=False,
         )
@@ -352,10 +352,10 @@ def test_lists_add_save_move(tmp_path):
     assert [l["name"] for l in lists] == ["first", "second"]
     assert lists[1]["entries"] == ["203.0.113.0/24", "2001:DB8::/32", "*.B.example."]
     assert lists[1]["resolve_via_exit"] is False and lists[1]["when_down"] == "direct"
-    client.post("/lists/2/move", data={"csrf": token, "dir": "up"})
+    client.post("/routing/2/move", data={"csrf": token, "dir": "up"})
     assert [l["name"] for l in state_of(tmp_path)["lists"]] == ["second", "first"]
     client.post(
-        "/lists/1/save",
+        "/routing/1/save",
         data={
             "csrf": token,
             "name": "first",
@@ -372,9 +372,9 @@ def test_lists_add_save_move(tmp_path):
 def test_list_errors_keep_input(tmp_path):
     client = signed_in(tmp_path)
     add_exit(client)
-    token = csrf_of(client.get("/lists").text)
+    token = csrf_of(client.get("/routing").text)
     r = client.post(
-        "/lists/add",
+        "/routing/add",
         data={"csrf": token, "name": "", "exit": "9", "kill_switch": "on", "entries": "ok.example\nnot valid!"},
     )
     assert r.status_code == 400
@@ -384,20 +384,20 @@ def test_list_errors_keep_input(tmp_path):
 
 def test_exits_and_lists_need_sign_in_and_csrf(tmp_path):
     client = make_client(tmp_path, {"sub": "1", "groups": ["admins"]})
-    for path in ("/exits", "/lists"):
+    for path in ("/exits", "/routing"):
         assert client.get(path, follow_redirects=False).status_code == 303
     assert client.post("/exits/add", data={}, follow_redirects=False).status_code == 303
     client = signed_in(tmp_path)
     assert client.post("/exits/add", data={"name": "x", "conf": CONF}).status_code == 400
-    assert client.post("/lists/add", data={"name": "x", "exit": "1"}).status_code == 400
+    assert client.post("/routing/add", data={"name": "x", "exit": "1"}).status_code == 400
 
 
 def test_list_accepts_wildcards_and_tld(tmp_path):
     client = signed_in(tmp_path)
     add_exit(client)
-    token = csrf_of(client.get("/lists").text)
+    token = csrf_of(client.get("/routing").text)
     client.post(
-        "/lists/add",
+        "/routing/add",
         data={"csrf": token, "name": "japan", "exit": "1", "kill_switch": "on", "entries": "*.dmm.co.jp\n*.jp\njp"},
     )
     assert state_of(tmp_path)["lists"][0]["entries"] == ["*.dmm.co.jp", "*.jp", "jp"]
@@ -406,18 +406,19 @@ def test_list_accepts_wildcards_and_tld(tmp_path):
 def test_list_comments_and_rename(tmp_path):
     client = signed_in(tmp_path)
     add_exit(client)
-    token = csrf_of(client.get("/lists").text)
+    token = csrf_of(client.get("/routing").text)
     text = "# streaming\nnetflix.com   # main\n\n\n\nnflxvideo.net\n\n"
     client.post(
-        "/lists/add", data={"csrf": token, "name": "Streaming (NL)", "exit": "1", "kill_switch": "on", "entries": text}
+        "/routing/add",
+        data={"csrf": token, "name": "Streaming (NL)", "exit": "1", "kill_switch": "on", "entries": text},
     )
     l = state_of(tmp_path)["lists"][0]
     assert l["name"] == "Streaming (NL)"
     assert l["entries"] == ["# streaming", "netflix.com   # main", "", "nflxvideo.net"]
-    page = client.get("/lists").text
+    page = client.get("/routing").text
     assert "netflix.com   # main" in page and "List format" in page
     client.post(
-        "/lists/1/save", data={"csrf": token, "name": "Video", "exit": "1", "kill_switch": "on", "entries": text}
+        "/routing/1/save", data={"csrf": token, "name": "Video", "exit": "1", "kill_switch": "on", "entries": text}
     )
     assert state_of(tmp_path)["lists"][0]["name"] == "Video"
 
@@ -428,7 +429,7 @@ def test_exit_dns_flag_and_no_groups_footer(tmp_path):
     token = csrf_of(client.get("/exits").text)
     no_dns = CONF.replace("DNS = 10.64.0.1, fd00:64::1\n", "")
     client.post("/exits/add", data={"csrf": token, "name": "no-dns", "conf": no_dns})
-    page = client.get("/lists").text
+    page = client.get("/routing").text
     assert 'data-dns="yes"' in page and 'data-dns="no"' in page and "Use exit DNS" in page
     assert "admins" not in client.get("/").text
 
@@ -436,16 +437,56 @@ def test_exit_dns_flag_and_no_groups_footer(tmp_path):
 def test_add_buttons_and_collapsed_lists(tmp_path):
     client = signed_in(tmp_path)
     add_exit(client)
-    token = csrf_of(client.get("/lists").text)
+    token = csrf_of(client.get("/routing").text)
     client.post(
-        "/lists/add", data={"csrf": token, "name": "ip-check", "exit": "1", "kill_switch": "on", "entries": "ipify.org"}
+        "/routing/add",
+        data={"csrf": token, "name": "ip-check", "exit": "1", "kill_switch": "on", "entries": "ipify.org"},
     )
-    page = client.get("/lists").text
+    page = client.get("/routing").text
     assert 'data-open="#new-list"' in page and 'id="new-list" hidden' in page
     assert 'data-open="#edit-1"' in page and 'id="edit-1" hidden' in page
     assert "→ provider-nl" in page and "kill switch on" in page
-    r = client.post("/lists/add", data={"csrf": token, "name": "", "exit": "1", "entries": ""})
+    r = client.post("/routing/add", data={"csrf": token, "name": "", "exit": "1", "entries": ""})
     assert 'id="new-list" hidden' not in r.text  # errors keep the form open
     exits = client.get("/exits").text
     assert 'data-open="#new-exit"' in exits and 'id="new-exit" hidden' in exits
     assert "Add blocklist" in client.get("/dns").text
+
+
+def test_routing_special_exits_sources_and_default(tmp_path):
+    client = signed_in(tmp_path)
+    add_exit(client)
+    token = csrf_of(client.get("/routing").text)
+    r = client.post(
+        "/routing/add",
+        data={
+            "csrf": token,
+            "name": "Not via VPN",
+            "exit": "direct",
+            "entries": "mail.example.com\nAS2906\nJP  # japan\nNETFLIX\nhttps://lists.example/cdn.json",
+        },
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    lst = state_of(tmp_path)["lists"][0]
+    assert lst["exit"] == "direct" and "AS2906" in lst["entries"]
+    r = client.post(
+        "/routing/add", data={"csrf": token, "name": "bad", "exit": "block", "entries": "PRIVATE\nhttp://x.example/a"}
+    )
+    assert r.status_code == 400 and "reserved" in r.text and "not an address" in r.text
+    r = client.post("/routing/default", data={"csrf": token, "exit": "1", "kill_switch": "on"}, follow_redirects=False)
+    assert r.status_code == 303 and state_of(tmp_path)["default"] == {"exit": 1, "when_down": "block"}
+    page = client.get("/routing").text
+    assert (
+        "Everything else" in page and "→ provider-nl" in page and 'value="direct"' in page and 'value="block"' in page
+    )
+    r = client.post("/exits/1/delete", data={"csrf": token})
+    assert "Everything else" in r.text and len(state_of(tmp_path)["exits"]) == 1
+    client.post("/routing/default", data={"csrf": token, "exit": "nope"})
+    assert state_of(tmp_path)["default"]["exit"] == 1
+
+
+def test_lists_url_redirects(tmp_path):
+    client = signed_in(tmp_path)
+    r = client.get("/lists", follow_redirects=False)
+    assert r.status_code == 308 and r.headers["location"] == "/routing"

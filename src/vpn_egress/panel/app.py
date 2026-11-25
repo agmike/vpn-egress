@@ -19,7 +19,17 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from .state import LABEL_RE, dns_config, dns_from_form, list_from_form, next_id, parse_wg_conf, read_json, save_section
+from .state import (
+    LABEL_RE,
+    dns_config,
+    dns_from_form,
+    exit_from_form,
+    list_from_form,
+    next_id,
+    parse_wg_conf,
+    read_json,
+    save_section,
+)
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 ICON_SVG = (Path(__file__).parent / "static" / "icon.svg").read_bytes()
@@ -418,8 +428,10 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if e is None:
             return RedirectResponse("/exits", status_code=303)
         users = [l.get("name") for l in state.get("lists", []) if isinstance(l, dict) and l.get("exit") == exit_id]
+        if (state.get("default") or {}).get("exit") == exit_id:
+            users.append("Everything else")
         if users:
-            flash(request, f"{e['name']} is used by {', '.join(users)}; move those lists first.", bad=True)
+            flash(request, f"{e['name']} is used by {', '.join(users)}; change those first.", bad=True)
         else:
             save_section(settings.state_dir, "exits", [x for x in state["exits"] if x is not e])
             flash(request, f"Deleted {e['name']}.")
@@ -465,16 +477,22 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         }
         if edit and edit["id"] == "new":
             new.update(edit["values"], errors=edit["errors"])
+        d = state.get("default") or {}
+        default = {"exit": d.get("exit", "direct"), "when_down": d.get("when_down", "block"), "errors": []}
+        if edit and edit["id"] == "default":
+            default.update(edit["values"], errors=edit["errors"])
         return TEMPLATES.TemplateResponse(
             request,
-            "lists.html",
+            "routing.html",
             {
                 "user": user,
-                "page": "lists",
+                "page": "routing",
                 "csrf": csrf_token(request),
                 "lists": lists,
                 "exits": exits,
                 "new": new,
+                "default": default,
+                "now": int(time.time()),
                 "flash": request.session.pop("flash", None),
             },
             status_code=status_code,
@@ -489,14 +507,14 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             "entries": form.get("entries", ""),
         }
 
-    @app.get("/lists", response_class=HTMLResponse)
+    @app.get("/routing", response_class=HTMLResponse)
     async def lists_get(request: Request):
         user = current_user(request)
         if user is None:
             return RedirectResponse("/", status_code=303)
         return lists_page(request, user)
 
-    @app.post("/lists/add", response_class=HTMLResponse)
+    @app.post("/routing/add", response_class=HTMLResponse)
     async def lists_add(request: Request):
         user, form = await guarded_form(request)
         if user is None:
@@ -515,9 +533,9 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         lists.append({"id": new_id, **parsed})
         save_section(settings.state_dir, "lists", lists)
         flash(request, f"Added {parsed['name']}.")
-        return RedirectResponse("/lists", status_code=303)
+        return RedirectResponse("/routing", status_code=303)
 
-    @app.post("/lists/{list_id}/save", response_class=HTMLResponse)
+    @app.post("/routing/{list_id}/save", response_class=HTMLResponse)
     async def lists_save(request: Request, list_id: int):
         user, form = await guarded_form(request)
         if user is None:
@@ -526,7 +544,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         lists = [l for l in state.get("lists", []) if isinstance(l, dict)]
         l = find(lists, list_id)
         if l is None:
-            return RedirectResponse("/lists", status_code=303)
+            return RedirectResponse("/routing", status_code=303)
         errors: list[str] = []
         parsed = list_from_form(form, state.get("exits", []), errors)
         if any(x.get("name") == parsed["name"] and x is not l for x in lists):
@@ -539,9 +557,9 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         l.update(parsed)
         save_section(settings.state_dir, "lists", lists)
         flash(request, f"Saved {parsed['name']}.")
-        return RedirectResponse(f"/lists#list-{list_id}", status_code=303)
+        return RedirectResponse(f"/routing#list-{list_id}", status_code=303)
 
-    @app.post("/lists/{list_id}/move")
+    @app.post("/routing/{list_id}/move")
     async def lists_move(request: Request, list_id: int):
         user, form = await guarded_form(request)
         if user is None:
@@ -552,9 +570,9 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if idx is not None and 0 <= idx + step < len(lists):
             lists[idx], lists[idx + step] = lists[idx + step], lists[idx]
             save_section(settings.state_dir, "lists", lists)
-        return RedirectResponse(f"/lists#list-{list_id}", status_code=303)
+        return RedirectResponse(f"/routing#list-{list_id}", status_code=303)
 
-    @app.post("/lists/{list_id}/delete")
+    @app.post("/routing/{list_id}/delete")
     async def lists_delete(request: Request, list_id: int):
         user, form = await guarded_form(request)
         if user is None:
@@ -564,7 +582,26 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if l:
             save_section(settings.state_dir, "lists", [x for x in lists if x is not l])
             flash(request, f"Deleted {l['name']}.")
-        return RedirectResponse("/lists", status_code=303)
+        return RedirectResponse("/routing", status_code=303)
+
+    @app.get("/lists", include_in_schema=False)
+    async def lists_moved():
+        return RedirectResponse("/routing", status_code=308)
+
+    @app.post("/routing/default", response_class=HTMLResponse)
+    async def routing_default(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        state = load_state()
+        exit_ref = exit_from_form(form.get("exit", ""), state.get("exits", []))
+        if exit_ref is None:
+            values = {"exit": form.get("exit"), "when_down": "block"}
+            return lists_page(request, user, {"id": "default", "values": values, "errors": ["Pick an exit"]}, 400)
+        when_down = "block" if form.get("kill_switch") == "on" else "direct"
+        save_section(settings.state_dir, "default", {"exit": exit_ref, "when_down": when_down})
+        flash(request, "Saved the default route.")
+        return RedirectResponse("/routing#default", status_code=303)
 
     return app
 

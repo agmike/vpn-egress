@@ -19,9 +19,12 @@ picked per domain or IP list in a small web panel.
 
 - **Exits:** paste a provider's WireGuard `.conf` (Proton, Nord, …); each becomes a
   kernel WireGuard tunnel, IPv4 and IPv6.
-- **Lists:** domains (with subdomains, or a whole TLD), IPv4/IPv6 addresses and ranges,
-  each list routed through one exit; first match wins; optional kill switch, optional
-  lookups through the exit's own DNS. Everything else leaves from the server itself.
+- **Routing:** ordered lists, each sent to an exit, **This server** or **Block**; first match
+  wins (for domains too). Entries: domains with subdomains (`example.com`), whole TLDs (`jp`),
+  GeoIP countries and services (`JP`, `NETFLIX`), ASNs (`AS2906`), addresses and ranges, and
+  remote lists by URL (plain, hosts, dnsmasq, RPZ or JSON; refreshed daily). Per list: kill
+  switch, lookups through the exit's own DNS. A catch-all (**Everything else**) picks where
+  the rest goes; private and local destinations always stay local.
 - **DNS:** dnsmasq on the tunnel with blocklists edited in the panel; plain DNS from the
   tunnel is redirected to it and DNS-over-TLS/QUIC is refused.
 - **Panel:** OIDC sign-in only (any provider; access by group).
@@ -84,7 +87,8 @@ Router:
 | `EGRESS_DNS_REDIRECT` / `EGRESS_BLOCK_DOT` | `true` | force tunnel DNS to dnsmasq; refuse port 853 |
 | `EGRESS_STATE_DIR` / `EGRESS_DATA_DIR` | `/state` / `/data` | |
 | `EGRESS_STATE_UID` | `10300` | owner of status files (the panel's uid) |
-| `EGRESS_APPLY_INTERVAL` / `EGRESS_BLOCKLIST_INTERVAL` | `60` / `86400` | seconds |
+| `EGRESS_APPLY_INTERVAL` / `EGRESS_BLOCKLIST_INTERVAL` / `EGRESS_SOURCE_INTERVAL` | `60` / `86400` / `86400` | seconds |
+| `EGRESS_GEOIP_URL` / `EGRESS_ASN_URL` | MetaCubeX/meta-rules-dat | URL templates with `{name}` / `{asn}` |
 
 Panel: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
 `OIDC_ALLOWED_GROUPS` (comma-separated; the provider must send a `groups` claim),

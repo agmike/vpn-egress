@@ -4,15 +4,17 @@ blocklists."""
 
 from __future__ import annotations
 
+import json
 import signal
 import sys
 import time
 import traceback
 
 from . import blocklists, firewall
-from .apply import apply
+from .apply import StateError, apply, required_sources, validate
 from .config import Config, ConfigError
 from .dnsmasq import Dnsmasq
+from .sources import SourceCache
 from .system import nft_apply
 
 POLL = 2  # seconds between checks of the state file
@@ -37,12 +39,23 @@ def main() -> int:
 
     dns = Dnsmasq(cfg)
     dns.prepare()
+    cache = SourceCache(cfg.data_dir / "sources", cfg.geoip_url, cfg.asn_url)
+
+    def refresh_sources(max_age: float) -> None:
+        """Download GeoIP/ASN/URL sources the lists use (missing ones only
+        with max_age=inf)."""
+        try:
+            raw = json.loads(state_file.read_text()) if state_file.exists() else {}
+            cache.refresh(required_sources(validate(raw)), max_age)
+        except (StateError, ValueError, OSError) as exc:
+            log(f"sources: {exc}")
+
     nft_apply(firewall.render(cfg))
     last_routes: list[str] = []
 
     def do_apply(reason: str) -> None:
         try:
-            status = apply(cfg, dns, last_routes)
+            status = apply(cfg, dns, last_routes, cache)
             if status["error"]:
                 log(f"apply ({reason}): {status['error']}")
         except Exception:  # keep running; the next tick retries
@@ -59,13 +72,14 @@ def main() -> int:
             log(f"blocklists failed:\n{traceback.format_exc()}")
 
     # Sets must exist before dnsmasq starts filling them.
+    refresh_sources(max_age=cfg.source_interval)
     do_apply("start")
     dns.start()
     blocklist_file = blocklists.blocklist_path(cfg)
     stale = not blocklist_file.exists() or time.time() - blocklist_file.stat().st_mtime > cfg.blocklist_interval
     do_blocklists(quick=not stale)
     now = time.monotonic()
-    last_apply = last_full = now
+    last_apply = last_full = last_sources = now
     last_mtime = state_file.stat().st_mtime if state_file.exists() else None
 
     while not stop:
@@ -77,6 +91,7 @@ def main() -> int:
         now = time.monotonic()
         if mtime != last_mtime:
             last_mtime = mtime
+            refresh_sources(max_age=float("inf"))  # only what's missing
             do_apply("state changed")
             do_blocklists(quick=True)
             last_apply = now
@@ -86,6 +101,10 @@ def main() -> int:
         if now - last_full >= cfg.blocklist_interval:
             do_blocklists(quick=False)
             last_full = now
+        if now - last_sources >= cfg.source_interval:
+            refresh_sources(max_age=cfg.source_interval)
+            do_apply("sources refreshed")
+            last_sources = last_apply = now
 
     log("stopping")
     dns.stop()

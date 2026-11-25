@@ -17,6 +17,9 @@ DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,40}$")  # exit and list names (display only)
 TLD_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")  # a whole TLD, e.g. "jp"
+GEO_RE = re.compile(r"^[A-Z][A-Z0-9-]{1,31}$")  # GeoIP country or service: "JP", "NETFLIX"
+ASN_RE = re.compile(r"^[Aa][Ss][0-9]{1,10}$")  # "AS2906"
+RESERVED_GEO = {"PRIVATE"}
 URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[\x21-\x7e]*$")
 MAX_LISTS = 30
 MAX_DOMAINS = 10000
@@ -195,12 +198,16 @@ def parse_entries(text: str, errors: list[str]) -> list[str]:
         s = line.split("#", 1)[0].strip().lower()
         if s:
             count += 1
-            try:
-                ipaddress.ip_network(s, strict=False)
-            except ValueError:
-                d = s.removeprefix("*.").rstrip(".")
-                if not (DOMAIN_RE.match(d) or TLD_RE.match(d)):
-                    errors.append(f"“{line.strip()}” is not an address, range or domain")
+            raw_entry = line.split("#", 1)[0].strip()
+            if raw_entry in RESERVED_GEO:
+                errors.append(f"“{raw_entry}” is reserved: private ranges always stay local")
+            elif not (URL_RE.match(raw_entry) or ASN_RE.match(raw_entry) or GEO_RE.match(raw_entry)):
+                try:
+                    ipaddress.ip_network(s, strict=False)
+                except ValueError:
+                    d = s.removeprefix("*.").rstrip(".")
+                    if not (DOMAIN_RE.match(d) or TLD_RE.match(d)):
+                        errors.append(f"“{line.strip()}” is not an address, range, domain or source")
         if line or (lines and lines[-1]):
             lines.append(line)
     while lines and not lines[-1]:
@@ -212,15 +219,26 @@ def parse_entries(text: str, errors: list[str]) -> list[str]:
     return lines
 
 
+SPECIAL_EXITS = {"direct": "This server", "block": "Block"}
+
+
+def exit_from_form(value: str, exits: list[dict]) -> int | str | None:
+    """A tunnel id, "direct" or "block"; None if it isn't one of those."""
+    if value in SPECIAL_EXITS:
+        return value
+    try:
+        exit_id = int(value)
+    except ValueError:
+        return None
+    return exit_id if exit_id in {e.get("id") for e in exits if isinstance(e, dict)} else None
+
+
 def list_from_form(form, exits: list[dict], errors: list[str]) -> dict:
     name = (form.get("name") or "").strip()
     if not LABEL_RE.match(name):
         errors.append("Name must be 1–40 characters")
-    try:
-        exit_id = int(form.get("exit", ""))
-    except ValueError:
-        exit_id = 0
-    if exit_id not in {e.get("id") for e in exits}:
+    exit_id = exit_from_form(form.get("exit", ""), exits)
+    if exit_id is None:
         errors.append("Pick an exit")
     return {
         "name": name,

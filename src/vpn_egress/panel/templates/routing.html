@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Routing · Egress{% endblock %}
+{% macro list_fields(l, exits) %}
+  <div class="fields">
+    <label>Name <input type="text" name="name" value="{{ l.name }}"></label>
+    <label>Exit
+      <select name="exit" data-exit-select>
+        {% for e in exits %}<option value="{{ e.id }}" data-dns="{{ 'yes' if e.has_dns else 'no' }}" {{ "selected" if e.id == l.exit }}>{{ e.name }}</option>{% endfor %}
+        <option value="direct" data-dns="no" data-special {{ "selected" if l.exit == "direct" }}>This server</option>
+        <option value="block" data-dns="no" data-special {{ "selected" if l.exit == "block" }}>Block</option>
+      </select>
+    </label>
+    <label class="check" data-kill-switch>
+      <input type="checkbox" name="kill_switch" {{ "checked" if l.when_down == "block" }}> Kill switch <span class="help" tabindex="0" title="While the exit is down, block this list's traffic. Off: it takes the normal route until the exit is back.">?</span></label>
+    <label class="check" data-exit-dns>
+      <input type="checkbox" name="resolve_via_exit" {{ "checked" if l.resolve_via_exit }}> Use exit DNS <span class="help" tabindex="0" title="Look up this list's domains with the exit's DNS server, so answers (CDN servers) match the exit's location. Shown only for exits whose config has a DNS server.">?</span></label>
+  </div>
+  <textarea name="entries" spellcheck="false" placeholder="one per line: example.com, jp, JP, NETFLIX, AS2906, 203.0.113.0/24, https://…, # comments">{{ l.entries }}</textarea>
+{% endmacro %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  {% if flash %}<div class="notice {{ 'bad' if flash.bad }}">{{ flash.text }}</div>{% endif %}
+  <p class="muted">Pipe traffic to a destination on a list leaves through the list's exit; the first matching list wins. The rest follows <a href="#default">Everything else</a>.</p>
+
+  {% if not exits %}
+  <section><p>Add an <a href="/exits">exit</a> first.</p></section>
+  {% endif %}
+
+  {% set exit_names = {"direct": "This server", "block": "Block"} %}{% for e in exits %}{% set _ = exit_names.update({e.id: e.name}) %}{% endfor %}
+  {% for l in lists %}
+  {% set s = l.status %}
+  <section class="item" id="list-{{ l.id }}">
+    <div class="cardhead">
+      <div class="summary">
+        <b>{{ loop.index }}. {{ l.name }}</b>
+        <span class="muted">→ {{ exit_names.get(l.exit, "?") }}
+          {% if l.exit not in ("direct", "block") %}· kill switch {{ "on" if l.when_down == "block" else "off" }}{% if l.resolve_via_exit %} · exit DNS{% endif %}{% endif %}
+          {% if s %}{% set r = s.v4 + s.v6 %}{% set n = s.learned4 + s.learned6 %}
+          · {% if s.tlds %}TLD {% for x in s.tlds %}.{{ x }}{{ ", " if not loop.last }}{% endfor %} · {% endif %}{{ s.domains }} domain{{ "s" if s.domains != 1 }}
+          {% for src in s.sources %}· <span class="{{ 'bad' if src.error and not src.entries else '' }}" title="{{ src.error or ('updated ' ~ ((now - src.updated) | age) if src.updated else 'not downloaded yet') }}">{{ {"geoip": "GeoIP ", "asn": "", "url": "list "}[src.kind] }}{{ src.name if src.kind != "url" else (src.name.split("/")[2]) }}{% if src.entries %} ({{ "{:,}".format(src.entries) }}){% elif src.pending %} (pending){% elif src.error %} (failed){% endif %}</span> {% endfor %}
+          · {{ "{:,}".format(r) }} range{{ "s" if r != 1 }} · {{ n }} IP{{ "s" if n != 1 }} learned{% endif %}</span>
+      </div>
+      <div class="actions">
+        <button type="button" class="link" data-open="#edit-{{ l.id }}" {{ "hidden" if l.errors }}>Edit</button>
+        <form method="post" action="/routing/{{ l.id }}/move"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="dir" value="up">
+          <button type="submit" class="link" {{ "disabled" if loop.first }} title="Higher priority">↑</button></form>
+        <form method="post" action="/routing/{{ l.id }}/move"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="dir" value="down">
+          <button type="submit" class="link" {{ "disabled" if loop.last }} title="Lower priority">↓</button></form>
+        <form method="post" action="/routing/{{ l.id }}/delete" data-confirm="Delete {{ l.name }}?"><input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="link">Delete</button></form>
+      </div>
+    </div>
+    <div class="editor" id="edit-{{ l.id }}" {{ "hidden" if not l.errors }}>
+      {% if l.errors %}<div class="notice bad">Not saved:<ul>{% for e in l.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+      <form method="post" action="/routing/{{ l.id }}/save">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        {{ list_fields(l, exits) }}
+        <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
+      </form>
+    </div>
+  </section>
+  {% endfor %}
+
+  <section class="item" id="default">
+    <div class="cardhead">
+      <div class="summary">
+        <b>Everything else</b>
+        <span class="muted">→ {{ exit_names.get(default.exit, "?") }}{% if default.exit not in ("direct", "block") %} · kill switch {{ "on" if default.when_down == "block" else "off" }}{% endif %} · private and local destinations always stay local</span>
+      </div>
+      <div class="actions">
+        <button type="button" class="link" data-open="#edit-default" {{ "hidden" if default.errors }}>Edit</button>
+      </div>
+    </div>
+    <div class="editor" id="edit-default" {{ "hidden" if not default.errors }}>
+      {% if default.errors %}<div class="notice bad">Not saved:<ul>{% for e in default.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+      <form method="post" action="/routing/default">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <div class="fields">
+          <label>Exit
+            <select name="exit" data-exit-select>
+              {% for e in exits %}<option value="{{ e.id }}" data-dns="no" {{ "selected" if e.id == default.exit }}>{{ e.name }}</option>{% endfor %}
+              <option value="direct" data-dns="no" data-special {{ "selected" if default.exit == "direct" }}>This server</option>
+              <option value="block" data-dns="no" data-special {{ "selected" if default.exit == "block" }}>Block</option>
+            </select>
+          </label>
+          <label class="check" data-kill-switch>
+            <input type="checkbox" name="kill_switch" {{ "checked" if default.when_down == "block" }}> Kill switch <span class="help" tabindex="0" title="While the exit is down, block everything else. Off: it leaves from this server until the exit is back.">?</span></label>
+        </div>
+        <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
+      </form>
+    </div>
+  </section>
+
+  {% if exits %}
+  <p><button type="button" class="primary" data-open="#new-list" {{ "hidden" if new.errors }}>Add list</button></p>
+  <section id="new-list" {{ "hidden" if not new.errors }}>
+    <h2>New list</h2>
+    {% if new.errors %}<div class="notice bad">Not saved:<ul>{% for e in new.errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+    <form method="post" action="/routing/add">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      {{ list_fields(new, exits) }}
+      <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
+    </form>
+  </section>
+  {% endif %}
+
+  <section>
+    <h2>List format</h2>
+    <p>One entry per line:</p>
+    <table class="format">
+      <tr><td class="mono">dmm.co.jp</td><td>the domain and all its subdomains (<span class="mono">*.</span> is optional)</td></tr>
+      <tr><td class="mono">jp</td><td>a whole top-level domain: everything under .jp</td></tr>
+      <tr><td class="mono">JP</td><td>Japan's IP ranges (GeoIP; capitals matter: <span class="mono">jp</span> is the TLD)</td></tr>
+      <tr><td class="mono">NETFLIX</td><td>a service's IP ranges: CLOUDFLARE, CLOUDFRONT, FACEBOOK, FASTLY, GOOGLE, NETFLIX, TELEGRAM, TOR, TWITTER</td></tr>
+      <tr><td class="mono">AS2906</td><td>a network's announced ranges (ASN)</td></tr>
+      <tr><td class="mono">https://…/list.txt</td><td>a remote list of domains or ranges, refreshed daily (plain, hosts, dnsmasq, RPZ or JSON)</td></tr>
+      <tr><td class="mono">203.0.113.0/24</td><td>an IPv4 or IPv6 address or range</td></tr>
+      <tr><td class="mono"># streaming CDNs</td><td>a comment, on its own line or after an entry</td></tr>
+    </table>
+    <p class="muted">Put specific lists above broad ones: services and domains before countries. Domains route by the addresses they resolve to, so a site may need a reload after it's added, and other sites sharing a CDN address with a listed one go the same way; to block a name itself, use <a href="/dns">DNS</a>. GeoIP is where addresses are registered: anycast CDNs (Cloudflare, Google) count as US wherever they serve from.</p>
+  </section>
+</main>
+<script>
+document.querySelectorAll("form").forEach(function (form) {
+  const sel = form.querySelector("[data-exit-select]");
+  if (!sel) return;
+  const toggles = [[form.querySelector("[data-exit-dns]"), o => o.dataset.dns === "yes"],
+                   [form.querySelector("[data-kill-switch]"), o => !("special" in o.dataset)]];
+  function sync() {
+    const opt = sel.options[sel.selectedIndex];
+    toggles.forEach(function ([box, test]) {
+      if (!box) return;
+      const show = !!opt && test(opt);
+      box.hidden = !show;
+      box.querySelector("input").disabled = !show;
+    });
+  }
+  sel.addEventListener("change", sync);
+  sync();
+});
+document.querySelectorAll("form[data-confirm]").forEach(function (f) {
+  f.addEventListener("submit", function (ev) { if (!confirm(f.dataset.confirm)) ev.preventDefault(); });
+});
+</script>
+{% endblock %}

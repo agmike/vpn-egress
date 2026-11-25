@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from vpn_egress.router import apply, blocklists, dnsmasq, firewall
+from vpn_egress.router import apply, blocklists, dnsmasq, firewall, sources
 from vpn_egress.router.config import Config, ConfigError
 
 
@@ -219,3 +219,93 @@ def test_dnsmasq_start_is_idempotent(tmp_path, monkeypatch):
     d.start()
     assert len(started) == 1
     assert (tmp_path / "run").stat().st_mode & 0o777 == 0o755
+
+
+# --- 0.2: sources, special exits, default -----------------------------------------
+
+
+def test_classify_sources():
+    c = apply.classify(["JP", "NETFLIX  # svc", "as2906", "AS15169", "jp", "https://lists.example/a.txt"], "t")
+    assert c["domains"] == ["jp"]
+    assert {(s.kind, s.name) for s in c["sources"]} == {
+        ("geoip", "JP"),
+        ("geoip", "NETFLIX"),
+        ("asn", "AS2906"),
+        ("asn", "AS15169"),
+        ("url", "https://lists.example/a.txt"),
+    }
+    with pytest.raises(apply.StateError):
+        apply.classify(["PRIVATE"], "t")
+    with pytest.raises(apply.StateError):
+        apply.classify(["http://plain.example/a.txt"], "t")
+
+
+def test_special_exits_and_default_rules():
+    s = state()
+    s["lists"].append({"id": 8, "name": "Local", "exit": "direct", "entries": ["mail.example.com"]})
+    s["lists"].append({"id": 9, "name": "Drop", "exit": "block", "entries": ["192.0.2.0/24"]})
+    s["default"] = {"exit": 3, "when_down": "direct"}
+    v = apply.validate(s)
+    rules = apply.wanted_rules(v["exits"], v["lists"], v["default"])
+    assert rules[20016] == ("fwmark", "0x10008", "lookup", "main")
+    assert rules[20018] == ("fwmark", "0x10009", "prohibit", "")
+    assert rules[20510] == ("fwmark", "0x100ff", "lookup", "1003") and 20511 not in rules
+    script = apply.render_routes(v["lists"], "awg0", v["default"])
+    assert "ip daddr { 10.0.0.0/8" in script and script.rstrip().endswith("meta mark set 0x100ff")
+    v["default"]["exit"] = "direct"
+    assert "0x100ff" not in apply.render_routes(v["lists"], "awg0", v["default"])
+    assert 20510 not in apply.wanted_rules(v["exits"], v["lists"], v["default"])
+
+
+def test_dnsmasq_first_match_wins():
+    s = state(entries=["example.com", "jp"])  # list 7: exit DNS via exit 3
+    s["lists"].insert(0, {"id": 1, "name": "Exceptions", "exit": "direct", "entries": ["mail.example.com", "shop.jp"]})
+    s["lists"].append({"id": 2, "name": "Later", "exit": "block", "entries": ["ads.example.com", "other.net"]})
+    v = apply.validate(s)
+    lists_conf, servers = apply.render_dnsmasq(v, {3: True})
+    assert "nftset=/mail.example.com/shop.jp/" in lists_conf
+    assert "nftset=/example.com/jp/" in lists_conf
+    assert "ads.example.com" not in lists_conf  # covered by example.com above it
+    assert "nftset=/other.net/" in lists_conf
+    assert "server=/mail.example.com/#" in servers and "server=/shop.jp/#" in servers
+    assert "server=/jp/10.64.0.1@egx3" in servers
+
+
+def test_sources_parse_formats():
+    plain = sources.parse("# c\n198.51.100.0/24\n2001:db8::/48\nexample.com\n0.0.0.0 hosts.example\n", True)
+    assert plain.v4 == {"198.51.100.0/24"} and plain.v6 == {"2001:db8::/48"}
+    assert plain.domains == {"example.com", "hosts.example"}
+    assert not sources.parse("example.com\n198.51.100.0/24", False).domains
+    js = sources.parse(
+        '{"prefixes": [{"ipv4Prefix": "203.0.113.0/24"}, {"ipv6Prefix": "2001:db8:1::/48"}],'
+        ' "syncToken": "123", "note": "a.b"}',
+        True,
+    )
+    assert js.v4 == {"203.0.113.0/24"} and js.v6 == {"2001:db8:1::/48"} and not js.domains
+
+
+def test_source_cache_keeps_last_good(tmp_path, monkeypatch):
+    cache = sources.SourceCache(tmp_path, "https://geo.example/{name}.list", "https://asn.example/{asn}.list")
+    src = sources.Source("geoip", "JP")
+    monkeypatch.setattr(sources, "fetch", lambda url: "\n".join(f"10.{i}.0.0/16" for i in range(10)))
+    cache.refresh({src}, max_age=0)
+    assert len(cache.load(src)) == 10 and cache.meta(src)["entries"] == 10
+    monkeypatch.setattr(sources, "fetch", lambda url: "10.0.0.0/16\n")  # shrank by 90%
+    cache.refresh({src}, max_age=0)
+    assert len(cache.load(src)) == 10 and "entries" in cache.meta(src)["error"]
+    seen = []
+    monkeypatch.setattr(sources, "fetch", lambda url: seen.append(url) or "10.0.0.0/8")
+    cache.refresh({src}, max_age=float("inf"))  # cached: nothing to do
+    assert seen == []
+    cache.refresh({sources.Source("asn", "AS2906")}, max_age=float("inf"))
+    assert seen == ["https://asn.example/AS2906.list"]
+
+
+def test_expand_merges_sources(tmp_path, monkeypatch):
+    cache = sources.SourceCache(tmp_path, "https://geo.example/{name}.list", "https://asn.example/{asn}.list")
+    monkeypatch.setattr(sources, "fetch", lambda url: "198.51.100.0/25\n198.51.100.128/25\n")
+    v = apply.validate(state(entries=["JP", "203.0.113.7"]))
+    cache.refresh(apply.required_sources(v), max_age=0)
+    info = apply.expand(v, cache)
+    assert v["lists"][0]["v4"] == ["198.51.100.0/24", "203.0.113.7/32"]  # collapsed
+    assert info[7][0]["name"] == "JP" and info[7][0]["entries"] == 2

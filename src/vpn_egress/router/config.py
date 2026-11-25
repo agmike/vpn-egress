@@ -15,6 +15,18 @@ class ConfigError(ValueError):
     pass
 
 
+# MetaCubeX/meta-rules-dat: per-country and per-service GeoIP lists and
+# per-ASN lists as plain CIDR text, updated daily.
+GEOIP_URL = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/{name}.list"
+ASN_URL = "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/asn/{asn}.list"
+
+
+def _template(value: str, field: str) -> str:
+    if not value.startswith("https://") or field not in value:
+        raise ConfigError(f"source URL templates must be https:// and contain {field}")
+    return value
+
+
 def _bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
@@ -32,6 +44,9 @@ class Config:
     state_uid: int
     apply_interval: int
     blocklist_interval: int
+    source_interval: int
+    geoip_url: str
+    asn_url: str
 
     @property
     def run_dir(self) -> Path:
@@ -69,6 +84,9 @@ class Config:
                 state_uid=int(get("EGRESS_STATE_UID", "10300")),
                 apply_interval=int(get("EGRESS_APPLY_INTERVAL", "60")),
                 blocklist_interval=int(get("EGRESS_BLOCKLIST_INTERVAL", "86400")),
+                source_interval=int(get("EGRESS_SOURCE_INTERVAL", "86400")),
+                geoip_url=_template(get("EGRESS_GEOIP_URL", GEOIP_URL), "{name}"),
+                asn_url=_template(get("EGRESS_ASN_URL", ASN_URL), "{asn}"),
             )
         except ValueError as exc:
             raise ConfigError(f"bad numeric setting: {exc}") from exc

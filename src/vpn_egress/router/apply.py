@@ -15,12 +15,21 @@ as "dns", are ignored here):
                      "dns": ["10.64.0.1"]}}
     ],
     "lists": [                      # priority order: the first match wins
-      {"id": 1, "name": "Streaming", "exit": 1, "when_down": "block",
-       "resolve_via_exit": true,
+      {"id": 1, "name": "Streaming", "exit": 1 | "direct" | "block",
+       "when_down": "block", "resolve_via_exit": true,
        "entries": ["198.51.100.0/24", "2001:db8::/32", "example.com", "jp",
+                   "JP", "NETFLIX", "AS2906", "https://example.com/list.txt",
                    "# comments and blank lines are ignored"]}
-    ]
+    ],
+    "default": {"exit": "direct" | "block" | 1, "when_down": "block"}
   }
+
+Entries: domains (with subdomains) and whole TLDs ("jp"), addresses and
+ranges, GeoIP countries and services in capitals ("JP", "NETFLIX"), ASNs
+("AS2906"), and https:// URLs of lists. Remote ones come from sources.py.
+Exits: a tunnel id, "direct" (this server's own address) or "block".
+The default applies to pipe traffic no list matched, except private,
+link-local and CGNAT destinations, which always stay local.
 
 What it manages (both IP families unless noted):
   - a kernel WireGuard interface per enabled exit, egx<id>, listen port
@@ -31,15 +40,18 @@ What it manages (both IP families unless noted):
     an exit (dnsmasq resolving through it) are routed into it
   - the pipe-return rule (19000): packets marked 0x02000000 (see
     firewall.py) use table 999, default via the pipe
-  - per list: fwmark 0x10000 + id and rules 20000 + 2*id (lookup the exit's
-    table) and 20001 + 2*id (prohibit: when_down=block, the kill switch;
+  - per list (and the default, as list 255): fwmark 0x10000 + id and rules
+    20000 + 2*id (lookup the exit's table, "main" for direct, prohibit for
+    block) and 20001 + 2*id (prohibit: when_down=block, the kill switch;
     when_down=direct falls through to the main table)
   - table inet vpn_egress_routes, updated in place (never recreated, so
     learned IPs survive): per list, sets l<id>_4/_6 (addresses and ranges)
     and d<id>_4/_6 (filled by dnsmasq from DNS answers, 2-day timeout)
   - dnsmasq's list config (nftset= lines) and servers-file (lists with
     resolve_via_exit ask the exit's DNS through the tunnel; while the exit is
-    down, a list without kill switch uses the normal upstreams)
+    down, a list without kill switch uses the normal upstreams). Domains are
+    taken top-down: one already covered by a higher list (itself or a parent
+    domain) is left out, so the first match wins for names as for IPs.
   - status.json in the state directory, for the panel (no secrets)
 """
 
@@ -55,6 +67,7 @@ from typing import Protocol
 
 from .config import Config
 from .firewall import RETURN_MARK
+from .sources import Source, SourceCache
 from .system import ip_json, nft_apply, run, write_if_changed, write_json
 
 ROUTES_TABLE = "inet vpn_egress_routes"
@@ -70,12 +83,20 @@ RETURN_TABLE = 999
 RETURN_PRIO = 19000
 MAX_ID = 200
 MAX_ENTRIES = 5000
+DEFAULT_ID = 255  # the catch-all, routed like a list
+SPECIAL_EXITS = ("direct", "block")
+LOCAL_V4 = "10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4"
+LOCAL_V6 = "::1/128, fc00::/7, fe80::/10, ff00::/8"
 HANDSHAKE_FRESH = 300
 LEARNED_TIMEOUT = "2d"
 
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,40}$")  # display only; everything is keyed by id
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9-]{2,63}$")
 TLD_RE = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
+GEO_RE = re.compile(r"^[A-Z][A-Z0-9-]{1,31}$")  # JP, NETFLIX (case matters: "jp" is a TLD)
+ASN_RE = re.compile(r"^[Aa][Ss]([0-9]{1,10})$")
+URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[\x21-\x7e]*$")
+RESERVED_GEO = {"PRIVATE"}  # private ranges must never go to an exit
 FAMILIES = ("-4", "-6")
 
 
@@ -142,29 +163,57 @@ def _iface_addr(value, version, what, required):
     return str(addr)
 
 
-def classify(entries, what):
-    """Split list lines into IPv4 networks, IPv6 networks and domains."""
+def classify(entries, what) -> dict:
+    """Sort list lines into IPv4/IPv6 ranges, domains and remote sources."""
     if not isinstance(entries, list) or len(entries) > 2 * MAX_ENTRIES:
         raise StateError(f"{what}: entries must be a list of at most {2 * MAX_ENTRIES} lines")
-    v4, v6, domains = set(), set(), set()
+    v4, v6, domains, sources = set(), set(), set(), set()
     for e in entries:
         if not isinstance(e, str):
             raise StateError(f"{what}: entries must be strings")
-        s = e.split("#", 1)[0].strip().lower()
-        if not s:
+        raw = e.split("#", 1)[0].strip()
+        if not raw:
             continue
+        if URL_RE.match(raw):
+            sources.add(Source("url", raw))
+            continue
+        m = ASN_RE.match(raw)
+        if m:
+            sources.add(Source("asn", f"AS{int(m.group(1))}"))
+            continue
+        if GEO_RE.match(raw) and "." not in raw:
+            if raw in RESERVED_GEO:
+                raise StateError(f"{what}: {raw} is reserved (private ranges always stay local)")
+            sources.add(Source("geoip", raw))
+            continue
+        s = raw.lower()
         try:
             net = ipaddress.ip_network(s, strict=False)
         except ValueError:
             d = s.removeprefix("*.").rstrip(".")
             if not (DOMAIN_RE.match(d) or TLD_RE.match(d)):
-                raise StateError(f"{what}: {e!r} is not an address, range or domain") from None
+                raise StateError(f"{what}: {e!r} is not an address, range, domain or source") from None
             domains.add(d)
             continue
         (v4 if net.version == 4 else v6).add(str(net))
-    if len(v4) + len(v6) + len(domains) > MAX_ENTRIES:
+    if len(v4) + len(v6) + len(domains) + len(sources) > MAX_ENTRIES:
         raise StateError(f"{what}: at most {MAX_ENTRIES} entries")
-    return sorted(v4), sorted(v6), sorted(domains)
+    return {"v4": sorted(v4), "v6": sorted(v6), "domains": sorted(domains), "sources": sources}
+
+
+def _exit_ref(value, exits, what):
+    if value in SPECIAL_EXITS:
+        return value
+    exit_id = _id(value, what)
+    if exit_id not in exits:
+        raise StateError(f"{what}: exit {exit_id} does not exist")
+    return exit_id
+
+
+def _when_down(value, what):
+    if value not in ("block", "direct"):
+        raise StateError(f"{what}: when_down must be block or direct")
+    return value
 
 
 def validate(state) -> dict:
@@ -210,26 +259,63 @@ def validate(state) -> dict:
         if lid in seen:
             raise StateError(f"{what}: duplicate id {lid}")
         seen.add(lid)
-        exit_id = _id(lst.get("exit"), what)
-        if exit_id not in exits:
-            raise StateError(f"{what}: exit {exit_id} does not exist")
-        when_down = lst.get("when_down", "block")
-        if when_down not in ("block", "direct"):
-            raise StateError(f"{what}: when_down must be block or direct")
-        v4, v6, domains = classify(lst.get("entries", lst.get("cidrs", [])), what)
         lists.append(
             {
                 "id": lid,
                 "name": _name(lst.get("name"), what),
-                "exit": exit_id,
-                "when_down": when_down,
+                "exit": _exit_ref(lst.get("exit"), exits, what),
+                "when_down": _when_down(lst.get("when_down", "block"), what),
                 "resolve_via_exit": bool(lst.get("resolve_via_exit", False)),
-                "v4": v4,
-                "v6": v6,
-                "domains": domains,
+                **classify(lst.get("entries", lst.get("cidrs", [])), what),
             }
         )
-    return {"exits": exits, "lists": lists}
+    default = state.get("default") or {}
+    if not isinstance(default, dict):
+        raise StateError("default must be an object")
+    return {
+        "exits": exits,
+        "lists": lists,
+        "default": {
+            "id": DEFAULT_ID,
+            "exit": _exit_ref(default.get("exit", "direct"), exits, "default"),
+            "when_down": _when_down(default.get("when_down", "block"), "default"),
+        },
+    }
+
+
+def required_sources(state: dict) -> set[Source]:
+    return set().union(*(lst["sources"] for lst in state["lists"])) if state["lists"] else set()
+
+
+def expand(state: dict, cache: SourceCache) -> dict[int, list[dict]]:
+    """Merge the cached remote sources into each list's ranges and domains.
+    Returns per-list source status for the panel."""
+    info: dict[int, list[dict]] = {}
+    for lst in state["lists"]:
+        v4, v6, domains = set(lst["v4"]), set(lst["v6"]), set(lst["domains"])
+        rows = []
+        for src in sorted(lst["sources"], key=lambda s: (s.kind, s.name)):
+            got = cache.load(src)
+            meta = cache.meta(src)
+            if got is not None:
+                v4 |= got.v4
+                v6 |= got.v6
+                domains |= got.domains
+            rows.append(
+                {
+                    "kind": src.kind,
+                    "name": src.name,
+                    "entries": meta.get("entries", 0) if got else 0,
+                    "updated": meta.get("updated"),
+                    "error": meta.get("error") if got is None or meta.get("error") else None,
+                    "pending": got is None and not meta.get("error"),
+                }
+            )
+        lst["v4"] = [str(n) for n in ipaddress.collapse_addresses(ipaddress.ip_network(x) for x in v4)]
+        lst["v6"] = [str(n) for n in ipaddress.collapse_addresses(ipaddress.ip_network(x) for x in v6)]
+        lst["domains"] = sorted(domains)
+        info[lst["id"]] = rows
+    return info
 
 
 # --- exits --------------------------------------------------------------------------
@@ -316,22 +402,30 @@ def ensure_pipe_return(pipe: str) -> None:
             )
 
 
-def wanted_rules(exits: dict, lists: list) -> dict[int, tuple[str, str, str, str]]:
+def wanted_rules(exits: dict, lists: list, default: dict | None = None) -> dict[int, tuple[str, str, str, str]]:
     want = {}
-    for lst in lists:
+    routed = list(lists)
+    if default and default["exit"] != "direct":
+        routed.append(default)
+    for lst in routed:
         mark = hex(MARK_BASE + lst["id"])
         prio = RULE_BASE + 2 * lst["id"]
-        want[prio] = ("fwmark", mark, "lookup", str(TABLE_BASE + lst["exit"]))
-        if lst["when_down"] == "block":
-            want[prio + 1] = ("fwmark", mark, "prohibit", "")
+        if lst["exit"] == "direct":
+            want[prio] = ("fwmark", mark, "lookup", "main")
+        elif lst["exit"] == "block":
+            want[prio] = ("fwmark", mark, "prohibit", "")
+        else:
+            want[prio] = ("fwmark", mark, "lookup", str(TABLE_BASE + lst["exit"]))
+            if lst["when_down"] == "block":
+                want[prio + 1] = ("fwmark", mark, "prohibit", "")
     for eid, ex in exits.items():
         if ex["enabled"]:
             want[OIF_RULE_BASE + eid] = ("oif", f"{EXIT_PREFIX}{eid}", "lookup", str(TABLE_BASE + eid))
     return want
 
 
-def sync_rules(exits: dict, lists: list) -> None:
-    want = wanted_rules(exits, lists)
+def sync_rules(exits: dict, lists: list, default: dict) -> None:
+    want = wanted_rules(exits, lists, default)
     for fam in FAMILIES:
         have = {}
         for r in ip_json(fam, "rule", "show"):
@@ -356,7 +450,7 @@ def sync_rules(exits: dict, lists: list) -> None:
 # --- nftables: table inet vpn_egress_routes, updated in place -------------------------
 
 
-def render_routes(lists: list, pipe: str) -> str:
+def render_routes(lists: list, pipe: str, default: dict | None = None) -> str:
     """Idempotent: creates what's missing, refreshes the static sets and the
     chain, and leaves the learned d-sets' elements alone."""
     t = ROUTES_TABLE
@@ -386,6 +480,14 @@ def render_routes(lists: list, pipe: str) -> str:
                     f"add rule {t} prerouting {proto} daddr @{kind}{i}_{fam} "
                     f"ct mark set ct mark | {i} meta mark set {mark} return"
                 )
+    if default and default["exit"] != "direct":
+        # Everything else, except destinations that must stay local.
+        i, mark = default["id"], hex(MARK_BASE + default["id"])
+        out += [
+            f"add rule {t} prerouting ip daddr {{ {LOCAL_V4} }} return",
+            f"add rule {t} prerouting ip6 daddr {{ {LOCAL_V6} }} return",
+            f"add rule {t} prerouting ct mark set ct mark | {i} meta mark set {mark}",
+        ]
     return "\n".join(out) + "\n"
 
 
@@ -397,9 +499,9 @@ def existing_sets() -> set[str]:
     return {it["set"]["name"] for it in items if "set" in it}
 
 
-def sync_routes(lists: list, pipe: str, last: list[str]) -> None:
+def sync_routes(lists: list, pipe: str, default: dict, last: list[str]) -> None:
     """`last` holds the previously applied script (one element), to skip no-ops."""
-    script = render_routes(lists, pipe)
+    script = render_routes(lists, pipe, default)
     wanted = {f"{k}{lst['id']}_{f}" for lst in lists for k in ("l", "d") for f in ("4", "6")}
     stale = existing_sets() - wanted
     if last and last[0] == script and not stale:
@@ -425,22 +527,41 @@ def learned_counts(list_id: int) -> dict[str, int]:
 # --- dnsmasq ------------------------------------------------------------------------
 
 
+def _covered(domain: str, claimed: set[str]) -> bool:
+    labels = domain.split(".")
+    return any(".".join(labels[k:]) in claimed for k in range(len(labels)))
+
+
 def render_dnsmasq(state: dict, exit_up: dict[int, bool]) -> tuple[str, str]:
     table = ROUTES_TABLE.split()[1]
     lists_conf = ["# Written by vpn-egress: DNS answers for list domains fill the list's sets."]
     servers = ["# Written by vpn-egress: list domains resolved through their exit."]
-    for lst in state["lists"]:
-        if not lst["domains"]:
-            continue
-        i, doms = lst["id"], "/".join(lst["domains"])
-        lists_conf.append(f"nftset=/{doms}/4#inet#{table}#d{i}_4,6#inet#{table}#d{i}_6")
-        ex = state["exits"][lst["exit"]]
-        if not (lst["resolve_via_exit"] and ex["enabled"] and ex["dns4"]):
-            continue
+
+    def exit_dns(lst):
+        ex = state["exits"].get(lst["exit"]) if isinstance(lst["exit"], int) else None
+        if not (ex and lst["resolve_via_exit"] and ex["enabled"] and ex["dns4"]):
+            return None
+        # Down with the kill switch on: still ask the exit, so lookups fail like the traffic.
         if exit_up.get(ex["id"]) or lst["when_down"] == "block":
-            # Down with the kill switch on: still ask the exit, so lookups fail like the traffic.
-            for d in lst["domains"]:
-                servers.append(f"server=/{d}/{ex['dns4'][0]}@{EXIT_PREFIX}{ex['id']}")
+            return f"{ex['dns4'][0]}@{EXIT_PREFIX}{ex['id']}"
+        return None
+
+    any_exit_dns = any(exit_dns(lst) for lst in state["lists"])
+    claimed: set[str] = set()
+    for lst in state["lists"]:
+        # First match wins: skip names a higher list already covers.
+        doms = [d for d in lst["domains"] if not _covered(d, claimed)]
+        claimed.update(doms)
+        if not doms:
+            continue
+        i = lst["id"]
+        lists_conf.append(f"nftset=/{'/'.join(doms)}/4#inet#{table}#d{i}_4,6#inet#{table}#d{i}_6")
+        upstream = exit_dns(lst)
+        if upstream:
+            servers += [f"server=/{d}/{upstream}" for d in doms]
+        elif any_exit_dns:
+            # Keep these on the normal upstreams even under a broader exit-DNS list.
+            servers += [f"server=/{d}/#" for d in doms]
     return "\n".join(lists_conf) + "\n", "\n".join(servers) + "\n"
 
 
@@ -484,7 +605,7 @@ def pipe_status(cfg: Config) -> dict:
     return {"interface": cfg.pipe_iface, "peers": peers}
 
 
-def apply(cfg: Config, dns: Dns, last_routes: list[str]) -> dict:
+def apply(cfg: Config, dns: Dns, last_routes: list[str], cache: SourceCache | None = None) -> dict:
     status = {"updated": int(time.time()), "error": None, "exits": [], "lists": []}
     state_file = cfg.state_dir / "state.json"
     try:
@@ -497,6 +618,7 @@ def apply(cfg: Config, dns: Dns, last_routes: list[str]) -> dict:
         write_json(cfg.state_dir / "status.json", status, cfg.state_uid)
         return status
 
+    sources_info = expand(state, cache) if cache else {}
     enabled = {eid for eid, ex in state["exits"].items() if ex["enabled"]}
     for iface in existing_exits() - {f"{EXIT_PREFIX}{eid}" for eid in enabled}:
         run("ip", "link", "del", iface, check=False)
@@ -530,8 +652,8 @@ def apply(cfg: Config, dns: Dns, last_routes: list[str]) -> dict:
     ensure_pipe_return(cfg.pipe_iface)
     # Lists whose exit is disabled keep their rules: with the kill switch they
     # stay blocked, without it they take the normal route.
-    sync_routes(state["lists"], cfg.pipe_iface, last_routes)
-    sync_rules(state["exits"], state["lists"])
+    sync_routes(state["lists"], cfg.pipe_iface, state["default"], last_routes)
+    sync_rules(state["exits"], state["lists"], state["default"])
     try:
         sync_dnsmasq(cfg, state, exit_up, dns)
     except StateError as exc:
@@ -547,11 +669,14 @@ def apply(cfg: Config, dns: Dns, last_routes: list[str]) -> dict:
                 "resolve_via_exit": lst["resolve_via_exit"],
                 "v4": len(lst["v4"]),
                 "v6": len(lst["v6"]),
-                "domains": len(lst["domains"]),
+                "domains": len([d for d in lst["domains"] if "." in d]),
+                "tlds": sorted(d for d in lst["domains"] if "." not in d),
+                "sources": sources_info.get(lst["id"], []),
                 "learned4": learned["4"],
                 "learned6": learned["6"],
             }
         )
+    status["default"] = {"exit": state["default"]["exit"], "when_down": state["default"]["when_down"]}
     status["pipe"] = pipe_status(cfg)
     write_json(cfg.state_dir / "status.json", status, cfg.state_uid)
     return status
