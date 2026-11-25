@@ -398,9 +398,9 @@ def test_list_accepts_wildcards_and_tld(tmp_path):
     token = csrf_of(client.get("/routing").text)
     client.post(
         "/routing/add",
-        data={"csrf": token, "name": "japan", "exit": "1", "kill_switch": "on", "entries": "*.dmm.co.jp\n*.jp\njp"},
+        data={"csrf": token, "name": "japan", "exit": "1", "kill_switch": "on", "entries": "*.example.co.jp\n*.jp\njp"},
     )
-    assert state_of(tmp_path)["lists"][0]["entries"] == ["*.dmm.co.jp", "*.jp", "jp"]
+    assert state_of(tmp_path)["lists"][0]["entries"] == ["*.example.co.jp", "*.jp", "jp"]
 
 
 def test_list_comments_and_rename(tmp_path):
