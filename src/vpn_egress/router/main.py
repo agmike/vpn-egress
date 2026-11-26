@@ -20,6 +20,11 @@ from .system import nft_apply
 
 POLL = 2  # seconds between checks of the state file
 TRAFFIC_INTERVAL = 60
+# After a change, exits that are new or got a new config need a moment for
+# their first handshake: re-check soon instead of at the next interval
+# (until then they count as down, and a kill switch blocks their lists).
+FAST_WINDOW = 60
+FAST_INTERVAL = 3
 
 
 def log(msg: str) -> None:
@@ -74,11 +79,14 @@ def main() -> int:
     last_routes: list[str] = []
     last_pipe: list[str] = []
 
+    exits_waiting = [False]
+
     def do_apply(reason: str) -> None:
         try:
             status = apply(cfg, dns, last_routes, cache, last_pipe)
             if status["error"]:
                 log(f"apply ({reason}): {status['error']}")
+            exits_waiting[0] = any(e["enabled"] and not e["up"] for e in status["exits"])
         except Exception:  # keep running; the next tick retries
             log(f"apply ({reason}) failed:\n{traceback.format_exc()}")
 
@@ -101,6 +109,7 @@ def main() -> int:
     do_blocklists(quick=not stale)
     now = time.monotonic()
     last_apply = last_full = last_sources = last_traffic = now
+    fast_until = now + FAST_WINDOW
     do_traffic()
     last_mtime = state_file.stat().st_mtime if state_file.exists() else None
 
@@ -121,6 +130,10 @@ def main() -> int:
             refresh_sources(max_age=float("inf"))  # only what's missing
             do_apply("state changed")
             do_blocklists(quick=True)
+            last_apply = now
+            fast_until = now + FAST_WINDOW
+        elif exits_waiting[0] and now < fast_until and now - last_apply >= FAST_INTERVAL:
+            do_apply("waiting for exits")
             last_apply = now
         elif now - last_apply >= cfg.apply_interval:
             do_apply("interval")

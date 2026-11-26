@@ -45,6 +45,7 @@ from .state import (
 )
 
 APPLY_WAIT = 5.0  # seconds a save waits for the router to apply it
+EXIT_SETTLE = 30  # seconds after a change that a down exit still counts as connecting
 
 
 def state_applied(state_dir: Path) -> bool:
@@ -54,9 +55,15 @@ def state_applied(state_dir: Path) -> bool:
     if "state_mtime" not in status:
         return True
     try:
-        return status["state_mtime"] == (state_dir / "state.json").stat().st_mtime_ns
+        mtime = (state_dir / "state.json").stat().st_mtime_ns
     except FileNotFoundError:
         return True
+    if status["state_mtime"] != mtime:
+        return False
+    # Exits that are new or got a new config take a few seconds to connect:
+    # shortly after a change, count them as part of applying it.
+    settling = time.time() - mtime / 1e9 < EXIT_SETTLE
+    return not (settling and any(e.get("enabled") and not e.get("up") for e in status.get("exits") or []))
 
 
 def _applying(request: Request) -> dict:

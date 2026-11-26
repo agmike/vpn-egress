@@ -1,4 +1,5 @@
 import json
+import os
 import time
 
 from fastapi.responses import RedirectResponse
@@ -769,3 +770,26 @@ def test_backup_that_does_not_fit_is_refused(tmp_path):
     assert "Nothing to restore" in client.post("/backup/restore", data={"csrf": token}).text
     r = client.post("/backup/upload", data={"csrf": token}, files={"file": ("b.json", b"{}", "application/json")})
     assert "Not a vpn-egress backup" in r.text
+
+
+def test_new_exits_count_as_applying_until_up(tmp_path):
+    from vpn_egress.panel.app import state_applied
+
+    client = signed_in(tmp_path)
+    add_exit(client)
+    mtime = (tmp_path / "state.json").stat().st_mtime_ns
+
+    def status(up):
+        exits = [{"id": 1, "enabled": True, "up": up}]
+        (tmp_path / "status.json").write_text(json.dumps({"state_mtime": mtime, "exits": exits}))
+
+    status(False)
+    assert not state_applied(tmp_path)
+    status(True)
+    assert state_applied(tmp_path)
+    status(False)
+    old = time.time() - 60
+    os.utime(tmp_path / "state.json", (old, old))
+    mtime = (tmp_path / "state.json").stat().st_mtime_ns
+    status(False)
+    assert state_applied(tmp_path)  # a dead exit doesn't keep the page waiting
