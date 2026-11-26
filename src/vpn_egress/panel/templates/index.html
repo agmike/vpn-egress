@@ -103,80 +103,9 @@
   </section>
   {% endif %}
 
-  <section id="backup">
-    <h2>Backup</h2>
-    <p class="muted">One file with everything set here: exits and their keys, the pipe's key and peers, routing, DNS and the
-      allowance. Not in it: the traffic counts, and settings that come from the router's environment (pipe port,
-      addresses, endpoint). Peers keep their configs after a restore.</p>
-    <details><summary>Download a backup</summary>
-      <form method="post" action="/backup/export" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
-        <label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" style="width: 200px"></label>
-        <label>Again <input type="password" name="passphrase2" autocomplete="new-password" style="width: 200px"></label>
-        <button type="submit">Download</button>
-      </form>
-      <p class="muted">With a passphrase the file is encrypted (AES-256-GCM, scrypt); without one it holds the private keys
-        in plain text. There is no way to recover a forgotten passphrase.</p>
-    </details>
-    <details><summary>Restore from a backup</summary>
-      <form method="post" action="/backup/upload" enctype="multipart/form-data" class="inline-fields">
-        <input type="hidden" name="csrf" value="{{ csrf }}">
-        <label>Backup file <input type="file" name="file" accept=".json,application/json"></label>
-        <label>Passphrase <input type="password" name="passphrase" autocomplete="off" style="width: 200px"></label>
-        <button type="submit">Upload</button>
-      </form>
-      <p class="muted">Nothing changes yet: the next page shows what the backup holds and asks before replacing everything.</p>
-    </details>
-    {% if snapshot %}
-    <form method="post" action="/backup/undo" data-confirm="Put back the settings from before the last restore?">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <p class="muted">Settings before the last restore are kept ({{ snapshot }}).
-        <button type="submit" class="link">Undo the restore</button></p>
-    </form>
-    {% endif %}
-  </section>
-
-  <section id="api">
-    <h2>API</h2>
-    <p class="muted">Tokens for scripts and monitoring: <span class="mono">GET /api/status</span> (warnings, exits,
-      traffic) and, with the backup scope, <span class="mono">POST /api/backup</span>. Send
-      <span class="mono">Authorization: Bearer &lt;token&gt;</span>.</p>
-    {% if tokens %}
-    <div class="scroll"><table>
-      <tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
-      {% for t in tokens %}
-      <tr>
-        <td class="nowrap">{{ t.name }}</td>
-        <td>{{ "status and backup" if t.scope == "backup" else "status" }}</td>
-        <td class="nowrap">{{ t.created | date if t.created else "—" }}</td>
-        <td class="nowrap">{{ t.last_used | date if t.last_used else "never" }}</td>
-        <td class="actions">
-          <form method="post" action="/api/tokens/{{ t.id }}/delete" data-confirm="Delete token {{ t.name }}? Anything using it stops working.">
-            <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="link">Delete</button></form>
-        </td>
-      </tr>
-      {% endfor %}
-    </table></div>
-    {% endif %}
-    <details><summary>Create a token</summary>
-      <form method="post" action="/api/tokens" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
-        <label>Name <input type="text" name="name" placeholder="e.g. monitoring" style="width: 200px"></label>
-        <label>Scope <select name="scope">
-          <option value="status">status (read-only)</option>
-          <option value="backup">status and backup (all private keys)</option>
-        </select></label>
-        <button type="submit">Create</button>
-      </form>
-    </details>
-  </section>
-
   <p class="muted">
     Status {{ status_age | age if status_age is not none else "missing" }}
     · build <span class="mono">{{ build_sha }}</span>
   </p>
 </main>
-<script>
-document.querySelectorAll("form[data-confirm]").forEach(function (f) {
-  f.addEventListener("submit", function (ev) { if (!confirm(f.dataset.confirm)) ev.preventDefault(); });
-});
-</script>
 {% endblock %}

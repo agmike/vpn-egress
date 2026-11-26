@@ -726,7 +726,7 @@ def test_backup_download_restore_and_undo(tmp_path):
     client, token = pipe_ready(tmp_path)
     client.post("/pipe/peers", data={"csrf": token, "name": "Phone"})
     add_exit(client, "nl")
-    page = client.get("/").text
+    page = client.get("/maintenance").text
     assert "Download a backup" in page and "Undo the restore" not in page
     r = client.post("/backup/export", data={"csrf": token, "passphrase": "pw", "passphrase2": "pw"})
     assert r.headers["content-disposition"].startswith('attachment; filename="vpn-egress-backup-')
@@ -807,7 +807,7 @@ def test_api_tokens_status_and_backup(tmp_path):
     from vpn_egress.panel import backup
 
     client = signed_in(tmp_path)
-    token = csrf_of(client.get("/").text)
+    token = csrf_of(client.get("/maintenance").text)
     soon = (datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=5)).isoformat()
     client.post("/exits/add", data={"csrf": token, "name": "nl", "conf": CONF, "expires": soon})
     (tmp_path / "status.json").write_text(
@@ -851,7 +851,7 @@ def test_api_tokens_status_and_backup(tmp_path):
     assert api.post("/api/backup", headers=auth, content=b"nope").status_code == 400
     assert api.post("/api/backup", headers=auth, json={"passphrase": 5}).status_code == 400
 
-    page = client.get("/").text
+    page = client.get("/maintenance").text
     assert "monitoring" in page and "never" not in page.split('id="api"', 1)[1].split("</section>", 1)[0]
     client.post("/api/tokens/1/delete", data={"csrf": token})
     assert api.get("/api/status", headers={"Authorization": f"Bearer {reader}"}).status_code == 401
@@ -860,6 +860,69 @@ def test_api_tokens_status_and_backup(tmp_path):
 
 def test_api_reports_a_silent_router(tmp_path):
     client = signed_in(tmp_path)
-    reader = create_token(client, csrf_of(client.get("/").text), "m", "status")
+    reader = create_token(client, csrf_of(client.get("/maintenance").text), "m", "status")
     r = TestClient(client.app).get("/api/status", headers={"Authorization": f"Bearer {reader}"})
     assert [w["kind"] for w in r.json()["warnings"]] == ["router"]
+
+
+def test_notifier_stages_confirmation_and_resolve(tmp_path):
+    from vpn_egress.panel.notify import Notifier
+
+    sent = []
+    path = tmp_path / "notify-state.json"
+    n = Notifier(path, lambda title, body: sent.append(title))
+
+    def w(stage, level="warn"):
+        return [{"kind": "exit_expiry", "key": "exit_expiry:1", "stage": stage, "level": level, "text": f"NL {stage}"}]
+
+    assert n.check(w("30")) == []  # first sighting: wait for a second check
+    assert [t for t, _ in n.check(w("30"))] == ["⚠️ Egress: NL 30"]
+    assert n.check(w("30")) == [] and n.check(w("30")) == []  # same stage: quiet
+    n.check(w("7", "bad"))
+    n.check(w("7", "bad"))
+    assert sent[-1] == "⛔ Egress: NL 7"
+    n.check([])  # a one-check blip doesn't resolve it
+    n.check(w("7", "bad"))
+    assert len(sent) == 2
+    n = Notifier(path, lambda title, body: sent.append(title))  # restart: remembers what was sent
+    n.check(w("7", "bad"))
+    assert len(sent) == 2
+    n.check([])
+    n.check([])
+    assert sent[-1] == "✅ Egress: Resolved: NL 7" and len(sent) == 3
+    n.check([])
+    assert len(sent) == 3
+
+
+def test_warnings_have_keys_and_stages():
+    from vpn_egress.panel.app import router_warnings, warnings
+
+    traffic = {"allowance": 100, "tx": 85, "projected_tx": None}
+    ws = warnings({"exits": [{"id": 3, "name": "nl", "expires": "2000-01-01"}]}, traffic)
+    assert [(w["key"], w["stage"]) for w in ws] == [("exit_expiry:3", "expired"), ("traffic", "80")]
+    status = {"updated": int(time.time()), "error": None, "exits": [{"id": 3, "name": "nl", "enabled": True}]}
+    assert [(w["key"], w["stage"]) for w in router_warnings(status, True)] == [("exit_down:3", "down")]
+    assert router_warnings(status, False) == []  # just changed: still connecting
+    assert router_warnings(None, True)[0]["stage"] == "silent"
+
+
+def test_maintenance_page_notify_targets_and_versions(tmp_path):
+    (tmp_path / "status.json").write_text(
+        json.dumps({"updated": int(time.time()), "versions": {"amneziawg_tools": "3.1.1", "amneziawg_module": None}})
+    )
+    client = signed_in(tmp_path)
+    page = client.get("/maintenance").text
+    assert "AmneziaWG tools" in page and "3.1.1" in page and "not loaded" in page
+    assert 'href="/maintenance" class="active"' in page and "Download a backup" in page and 'id="api"' in page
+    token = csrf_of(page)
+    r = client.post("/maintenance/notify/add", data={"csrf": token, "url": "not a url"})
+    assert "doesn&#39;t recognise" in r.text and not (tmp_path / "state.json").exists()
+    secret = "s3cr3tTOKENvalue"
+    url = f"json://user:{secret}@127.0.0.1:9/hook"
+    r = client.post("/maintenance/notify/add", data={"csrf": token, "url": url})
+    assert state_of(tmp_path)["notify"] == {"urls": [url]}
+    assert "Added" in r.text and secret not in r.text and "127.0.0.1" in r.text
+    r = client.post("/maintenance/notify/test", data={"csrf": token})  # nothing listens on port 9
+    assert "Sent to 0 of 1; failed" in r.text and secret not in r.text
+    client.post("/maintenance/notify/0/delete", data={"csrf": token})
+    assert state_of(tmp_path)["notify"] == {"urls": []}

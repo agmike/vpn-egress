@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Maintenance · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  {% if flash %}<div class="notice {{ 'bad' if flash.bad }}">{{ flash.text }}</div>{% endif %}
+
+  <section id="notifications">
+    <h2>Notifications</h2>
+    <p class="muted">Sent through <a href="https://github.com/caronc/apprise/wiki" rel="noreferrer">Apprise</a> when
+      an exit is down for two minutes, the router stops reporting or fails, an exit's config is 30, 7 or 1 days from
+      expiring (or expired), and traffic reaches 80% or 100% of the allowance or is on course to exceed it; and again
+      when it's resolved.</p>
+    {% if targets %}
+    <div class="scroll"><table>
+      <tr><th>Service</th><th>URL</th><th></th></tr>
+      {% for t in targets %}
+      <tr>
+        <td class="nowrap">{{ t.service }}</td>
+        <td class="mono">{{ t.masked }}</td>
+        <td class="actions">
+          <form method="post" action="/maintenance/notify/{{ loop.index0 }}/delete" data-confirm="Remove this {{ t.service }} target?">
+            <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="link">Remove</button></form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    <form method="post" action="/maintenance/notify/test"><input type="hidden" name="csrf" value="{{ csrf }}">
+      <p><button type="submit">Send a test</button></p></form>
+    {% else %}
+    <p class="muted">No targets yet.</p>
+    {% endif %}
+    <details><summary>Add a target</summary>
+      <form method="post" action="/maintenance/notify/add" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label style="flex: 1; min-width: 260px">Apprise URL <input type="text" name="url" autocomplete="off" spellcheck="false"
+          placeholder="tgram://bottoken/chatid · ntfy://ntfy.sh/topic · mailtos://user:pass@example.com"></label>
+        <button type="submit">Add</button>
+      </form>
+      <p class="muted">The URL's tokens and passwords are stored on this server (and in backups) and shown masked from
+        now on. Formats for each service: <a href="https://github.com/caronc/apprise/wiki#notification-services" rel="noreferrer">Apprise wiki</a>.</p>
+    </details>
+  </section>
+
+  <section id="backup">
+    <h2>Backup</h2>
+    <p class="muted">One file with everything set here: exits and their keys, the pipe's key and peers, routing, DNS and the
+      allowance. Not in it: the traffic counts, and settings that come from the router's environment (pipe port,
+      addresses, endpoint). Peers keep their configs after a restore.</p>
+    <details><summary>Download a backup</summary>
+      <form method="post" action="/backup/export" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" style="width: 200px"></label>
+        <label>Again <input type="password" name="passphrase2" autocomplete="new-password" style="width: 200px"></label>
+        <button type="submit">Download</button>
+      </form>
+      <p class="muted">With a passphrase the file is encrypted (AES-256-GCM, scrypt); without one it holds the private keys
+        in plain text. There is no way to recover a forgotten passphrase.</p>
+    </details>
+    <details><summary>Restore from a backup</summary>
+      <form method="post" action="/backup/upload" enctype="multipart/form-data" class="inline-fields">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Backup file <input type="file" name="file" accept=".json,application/json"></label>
+        <label>Passphrase <input type="password" name="passphrase" autocomplete="off" style="width: 200px"></label>
+        <button type="submit">Upload</button>
+      </form>
+      <p class="muted">Nothing changes yet: the next page shows what the backup holds and asks before replacing everything.</p>
+    </details>
+    {% if snapshot %}
+    <form method="post" action="/backup/undo" data-confirm="Put back the settings from before the last restore?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p class="muted">Settings before the last restore are kept ({{ snapshot }}).
+        <button type="submit" class="link">Undo the restore</button></p>
+    </form>
+    {% endif %}
+  </section>
+
+  <section id="api">
+    <h2>API</h2>
+    <p class="muted">Tokens for scripts and monitoring: <span class="mono">GET /api/status</span> (warnings, exits,
+      traffic) and, with the backup scope, <span class="mono">POST /api/backup</span>. Send
+      <span class="mono">Authorization: Bearer &lt;token&gt;</span>.</p>
+    {% if tokens %}
+    <div class="scroll"><table>
+      <tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+      {% for t in tokens %}
+      <tr>
+        <td class="nowrap">{{ t.name }}</td>
+        <td>{{ "status and backup" if t.scope == "backup" else "status" }}</td>
+        <td class="nowrap">{{ t.created | date if t.created else "—" }}</td>
+        <td class="nowrap">{{ t.last_used | date if t.last_used else "never" }}</td>
+        <td class="actions">
+          <form method="post" action="/api/tokens/{{ t.id }}/delete" data-confirm="Delete token {{ t.name }}? Anything using it stops working.">
+            <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="link">Delete</button></form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+    <details><summary>Create a token</summary>
+      <form method="post" action="/api/tokens" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Name <input type="text" name="name" placeholder="e.g. monitoring" style="width: 200px"></label>
+        <label>Scope <select name="scope">
+          <option value="status">status (read-only)</option>
+          <option value="backup">status and backup (all private keys)</option>
+        </select></label>
+        <button type="submit">Create</button>
+      </form>
+    </details>
+  </section>
+
+  <section id="versions">
+    <h2>Versions</h2>
+    {% set labels = {"vpn_egress": "vpn-egress (router)", "amneziawg_tools": "AmneziaWG tools",
+        "amneziawg_module": "AmneziaWG kernel module", "wireguard_tools": "WireGuard tools",
+        "wireguard_module": "WireGuard kernel module", "dnsmasq": "dnsmasq", "nftables": "nftables", "kernel": "Kernel"} %}
+    <table class="format">
+      <tr><td class="muted">vpn-egress (panel)</td><td class="mono">{{ panel_version }}</td></tr>
+      {% for key, label in labels.items() %}{% if key in versions %}
+      <tr><td class="muted">{{ label }}</td><td class="mono">{{ versions[key] or "not loaded" }}</td></tr>
+      {% endif %}{% endfor %}
+    </table>
+    {% if not versions %}<p class="muted">No report from the router yet.</p>{% endif %}
+  </section>
+</main>
+<script>
+document.querySelectorAll("form[data-confirm]").forEach(function (f) {
+  f.addEventListener("submit", function (ev) { if (!confirm(f.dataset.confirm)) ev.preventDefault(); });
+});
+</script>
+{% endblock %}

@@ -48,3 +48,51 @@ def write_json(path: Path, data: dict, uid: int) -> None:
     except PermissionError:
         pass
     tmp.replace(path)
+
+
+def _first_line(*args: str) -> str | None:
+    try:
+        out = run(*args, check=False)
+    except OSError:
+        return None
+    line = (out.stdout or out.stderr).strip().splitlines()
+    return line[0] if line else None
+
+
+def _read(path: str) -> str | None:
+    try:
+        return Path(path).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _tool_versions(pipe_tool: str) -> dict:
+    import re
+
+    def ver(line: str | None) -> str | None:
+        m = re.search(r"v?([0-9]+(?:\.[0-9]+)+[0-9A-Za-z.+-]*)", line or "")
+        return m.group(1) if m else None
+
+    tools = {
+        "wireguard_tools": ver(_first_line("wg", "--version")),
+        "dnsmasq": ver(_first_line("dnsmasq", "--version")),
+        "nftables": ver(_first_line("nft", "--version")),
+    }
+    if pipe_tool == "awg":
+        tools["amneziawg_tools"] = ver(_first_line("awg", "--version"))
+    return tools
+
+
+_TOOLS: dict = {}
+
+
+def versions(pipe_tool: str) -> dict:
+    """Software versions for the panel: tools in this image (once), kernel
+    and modules on the host (each time: a module can be reloaded)."""
+    if not _TOOLS:
+        _TOOLS.update(_tool_versions(pipe_tool))
+    out = {"vpn_egress": os.environ.get("VPN_EGRESS_VERSION", "dev"), **_TOOLS, "kernel": os.uname().release}
+    out["wireguard_module"] = _read("/sys/module/wireguard/version")
+    if pipe_tool == "awg":
+        out["amneziawg_module"] = _read("/sys/module/amneziawg/version")
+    return out

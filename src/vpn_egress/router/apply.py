@@ -69,7 +69,7 @@ from . import pipe as pipe_mod
 from .config import Config
 from .firewall import RETURN_MARK
 from .sources import Source, SourceCache
-from .system import ip_json, nft_apply, run, write_if_changed, write_json
+from .system import ip_json, nft_apply, run, versions, write_if_changed, write_json
 
 ROUTES_TABLE = "inet vpn_egress_routes"
 EXIT_PREFIX = "egx"
@@ -588,7 +588,7 @@ def sync_dnsmasq(cfg: Config, state: dict, exit_up: dict[int, bool], dns: Dns) -
 def apply(
     cfg: Config, dns: Dns, last_routes: list[str], cache: SourceCache | None = None, last_pipe: list[str] | None = None
 ) -> dict:
-    status = {"updated": int(time.time()), "error": None, "exits": [], "lists": []}
+    status = {"updated": int(time.time()), "error": None, "exits": [], "lists": [], "versions": versions(cfg.pipe_tool)}
     state_file = cfg.state_dir / "state.json"
     # Which version of the state this status describes: the panel waits for
     # it after a save, so pages show the result, not the previous state.

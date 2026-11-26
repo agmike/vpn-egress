@@ -36,11 +36,17 @@ picked per domain or IP list in a small web panel.
 - **Transfer meter:** bytes sent and received on the uplink per calendar month (UTC), kept
   across restarts and reboots, with an optional allowance (OCI's free tier: 10 TB outbound),
   set or turned off on the Status page, a month-end projection and a warning at 80%.
-- **Backup:** one file with everything set in the panel (exits and keys, pipe key and peers,
+- **Backup** (Maintenance page): one file with everything set in the panel (exits and keys, pipe key and peers,
   routing, DNS, allowance), encrypted with a passphrase (scrypt, AES-256-GCM) or plain. A
   restore shows what it would change, is checked with the router's own rules first, and can be
   undone (the last 5 states before a restore are kept in `snapshots/`).
-- **API:** tokens made on the Status page (shown once, stored hashed) for monitoring and
+- **Notifications:** through [Apprise](https://github.com/caronc/apprise) (Telegram, ntfy,
+  email, Discord, … — any number of targets, shown masked): an exit down for two minutes, the
+  router silent or failing, an exit config 30/7/1 days from expiring, traffic at 80%/100% of
+  the allowance or on course to exceed it, and when each is resolved.
+- **Maintenance page:** notifications, backup, API tokens, and the versions in use (vpn-egress,
+  AmneziaWG tools and kernel module, WireGuard, dnsmasq, nftables, kernel).
+- **API:** tokens made on the Maintenance page (shown once, stored hashed) for monitoring and
   scripted backups; see [API](#api).
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
@@ -121,7 +127,7 @@ first save in the panel, the panel's copy is used.
 
 ## API
 
-Send `Authorization: Bearer <token>`; tokens are created on the Status page with one of two
+Send `Authorization: Bearer <token>`; tokens are created on the Maintenance page with one of two
 scopes, `status` or `backup` (which includes `status`).
 
 - `GET /api/status` — for monitoring:

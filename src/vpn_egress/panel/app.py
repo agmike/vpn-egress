@@ -8,6 +8,7 @@ state.json; the router (vpn-egress-router) validates and applies it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime
 import os
 import secrets
@@ -21,7 +22,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import api, backup
+from . import api, backup, notify
 from .state import (
     LABEL_RE,
     allocate_addresses,
@@ -44,6 +45,7 @@ from .state import (
     traffic_allowance,
 )
 
+NOTIFY_INTERVAL = 60  # seconds between checks for notifications
 APPLY_WAIT = 5.0  # seconds a save waits for the router to apply it
 EXIT_SETTLE = 30  # seconds after a change that a down exit still counts as connecting
 
@@ -189,6 +191,15 @@ def today() -> datetime.date:
     return datetime.datetime.now(datetime.UTC).date()
 
 
+def _warning(kind: str, key: str, stage: str, level: str, text: str, resolved: str) -> dict:
+    """kind: what sort; key: what it's about; stage: how far along (notifications
+    go out when it changes); level: warn or bad; resolved: the all-clear message."""
+    return {"kind": kind, "key": key, "stage": stage, "level": level, "text": text, "resolved": resolved}
+
+
+TRAFFIC_OK = "Transfer is back within the allowance (a new month, or a new allowance)."
+
+
 def warnings(state: dict, traffic: dict | None) -> list[dict]:
     """Things to act on soon: exit configs expiring, the transfer allowance."""
     out = []
@@ -197,59 +208,47 @@ def warnings(state: dict, traffic: dict | None) -> list[dict]:
             continue
         info = expiry_info(e.get("expires"), today())
         if info and info["level"] != "ok":
-            when = f"expired {-info['days']} days ago" if info["days"] < 0 else f"expires in {info['days']} days"
-            out.append(
-                {
-                    "kind": "exit_expiry",
-                    "level": info["level"],
-                    "text": f"Exit {e.get('name')}: config {when} ({info['date']}). "
-                    "Get a new one from the provider and replace it on Exits.",
-                }
+            d = info["days"]
+            when = f"expired {-d} days ago" if d < 0 else f"expires in {d} days"
+            stage = "expired" if d < 0 else "1" if d <= 1 else "7" if d <= 7 else "30"
+            text = (
+                f"Exit {e.get('name')}: config {when} ({info['date']}). "
+                "Get a new one from the provider and replace it on Exits."
             )
+            done = f"Exit {e.get('name')}: config no longer expiring soon (new expiry date set)."
+            out.append(_warning("exit_expiry", f"exit_expiry:{e.get('id')}", stage, info["level"], text, done))
     if traffic and traffic.get("allowance"):
         allowance, tx, proj = traffic["allowance"], traffic.get("tx", 0), traffic.get("projected_tx")
         if tx >= allowance:
-            out.append(
-                {
-                    "kind": "traffic",
-                    "level": "bad",
-                    "text": f"Transfer this month is over the allowance: {human_size(tx)}.",
-                }
-            )
+            text = f"Transfer this month is over the allowance: {human_size(tx)}."
+            out.append(_warning("traffic", "traffic", "100", "bad", text, TRAFFIC_OK))
         elif tx >= 0.8 * allowance:
-            out.append(
-                {
-                    "kind": "traffic",
-                    "level": "warn",
-                    "text": f"Transfer this month is at {tx / allowance:.0%} of the allowance.",
-                }
-            )
+            text = f"Transfer this month is at {tx / allowance:.0%} of the allowance."
+            out.append(_warning("traffic", "traffic", "80", "warn", text, TRAFFIC_OK))
         elif proj and proj > allowance:
-            out.append(
-                {
-                    "kind": "traffic",
-                    "level": "warn",
-                    "text": f"At this rate, transfer reaches {human_size(proj)} by the end of the month.",
-                }
-            )
+            text = f"At this rate, transfer reaches {human_size(proj)} by the end of the month."
+            out.append(_warning("traffic", "traffic", "projected", "warn", text, TRAFFIC_OK))
     return out
 
 
-STATUS_STALE = 300  # seconds without a router status before the API reports it
+STATUS_STALE = 300  # seconds without a router status before it counts as silent
 
 
 def router_warnings(status: dict | None, applied: bool) -> list[dict]:
     """For monitoring: the router itself (the Status page shows these inline)."""
-    now = time.time()
-    if not status or now - status.get("updated", 0) > STATUS_STALE:
-        return [{"kind": "router", "level": "bad", "text": "No recent status from the router: is it running?"}]
+    if not status or time.time() - status.get("updated", 0) > STATUS_STALE:
+        text = "No recent status from the router: is it running?"
+        return [_warning("router", "router", "silent", "bad", text, "The router is reporting again.")]
     out = []
     if status.get("error"):
-        out.append({"kind": "router", "level": "bad", "text": f"Router: {status['error']}"})
+        text = f"Router: {status['error']}"
+        out.append(_warning("router", "router", "error", "bad", text, "The router applies the state again."))
     if applied:  # right after a change, new exits are still connecting
         for e in status.get("exits") or []:
             if e.get("enabled") and not e.get("up"):
-                out.append({"kind": "exit_down", "level": "bad", "text": f"Exit {e.get('name')} is down."})
+                name = e.get("name")
+                text, done = f"Exit {name} is down.", f"Exit {name} is up again."
+                out.append(_warning("exit_down", f"exit_down:{e.get('id')}", "down", "bad", text, done))
     return out
 
 
@@ -260,7 +259,15 @@ TEMPLATES.env.filters["date"] = lambda ts: time.strftime("%-d %b %H:%M UTC", tim
 
 
 def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(notify_loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.settings = settings
 
     @app.middleware("http")
@@ -388,6 +395,38 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             for t in api.tokens(raw_state)
         ]
 
+    def current_warnings(raw_state: dict) -> list[dict]:
+        status = read_json(settings.state_dir / "status.json")
+        applied = state_applied(settings.state_dir)
+        return router_warnings(status, applied) + warnings(raw_state, load_traffic(raw_state))
+
+    notifier = notify.Notifier(settings.state_dir / "notify-state.json", lambda title, body: None)
+
+    def notify_check() -> None:
+        state = load_state()
+        targets = notify.urls(state)
+        if not targets:
+            return  # nothing is tracked: targets added later hear about what's current
+
+        def sender(title: str, body: str) -> None:
+            results = notify.send(targets, title, f"{body}\n{settings.public_url}")
+            for url, ok in zip(targets, results, strict=True):
+                if not ok:
+                    print(f"vpn-egress-panel: notification to {notify.describe(url)['masked']} failed", flush=True)
+
+        notifier.sender = sender
+        notifier.check(current_warnings(state))
+
+    async def notify_loop() -> None:
+        while True:
+            await asyncio.sleep(NOTIFY_INTERVAL)
+            try:
+                await asyncio.to_thread(notify_check)
+            except Exception:  # keep checking; log the cause
+                import traceback
+
+                print(f"vpn-egress-panel: notifications failed:\n{traceback.format_exc()}", flush=True)
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         user = current_user(request)
@@ -410,11 +449,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "status": status,
                 "state": state,
                 "traffic": traffic,
-                "snapshot": (lambda snaps: backup.snapshot_time(snaps[-1]) if snaps else None)(
-                    backup.snapshots(settings.state_dir)
-                ),
                 "allowance_text": size_text(traffic.get("allowance")) if traffic else "",
-                "tokens": api_tokens(raw_state),
                 "warnings": warnings(raw_state, traffic),
                 "flash": request.session.pop("flash", None),
                 "status_age": int(time.time()) - status["updated"] if status and status.get("updated") else None,
@@ -617,6 +652,80 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             flash(request, f"Allowance set to {human_size(allowance)}." if allowance else "Allowance turned off.")
         return RedirectResponse("/", status_code=303)
 
+    # --- maintenance: notifications, backup, API, versions ------------------------------
+
+    @app.get("/maintenance", response_class=HTMLResponse)
+    async def maintenance(request: Request):
+        user = current_user(request)
+        if user is None:
+            return RedirectResponse("/", status_code=303)
+        raw_state = load_state()
+        snaps = backup.snapshots(settings.state_dir)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "maintenance.html",
+            {
+                "user": user,
+                "page": "maintenance",
+                "csrf": csrf_token(request),
+                "flash": request.session.pop("flash", None),
+                "targets": [notify.describe(u) for u in notify.urls(raw_state)],
+                "snapshot": backup.snapshot_time(snaps[-1]) if snaps else None,
+                "tokens": api_tokens(raw_state),
+                "versions": (read_json(settings.state_dir / "status.json") or {}).get("versions") or {},
+                "panel_version": os.environ.get("BUILD_SHA", "dev"),
+            },
+        )
+
+    @app.post("/maintenance/notify/add")
+    async def notify_add(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        url = (form.get("url") or "").strip()
+        targets = notify.urls(load_state())
+        if not notify.valid(url):
+            flash(request, "Not added: Apprise doesn't recognise that URL.", bad=True)
+        elif url in targets:
+            flash(request, "That target is already there.", bad=True)
+        elif len(targets) >= notify.MAX_URLS:
+            flash(request, f"At most {notify.MAX_URLS} targets.", bad=True)
+        else:
+            save_section(settings.state_dir, "notify", {"urls": [*targets, url]})
+            flash(request, f"Added {notify.describe(url)['service']}. Send a test to check it.")
+        return RedirectResponse("/maintenance#notifications", status_code=303)
+
+    @app.post("/maintenance/notify/{index}/delete")
+    async def notify_delete(request: Request, index: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        targets = notify.urls(load_state())
+        if 0 <= index < len(targets):
+            gone = targets.pop(index)
+            save_section(settings.state_dir, "notify", {"urls": targets})
+            flash(request, f"Removed {notify.describe(gone)['service']}.")
+        return RedirectResponse("/maintenance#notifications", status_code=303)
+
+    @app.post("/maintenance/notify/test")
+    async def notify_test(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        targets = notify.urls(load_state())
+        body = f"A test from the egress panel ({settings.public_url})."
+        results = await asyncio.to_thread(notify.send, targets, "Egress: test", body)
+        failed = [notify.describe(u)["masked"] for u, ok in zip(targets, results, strict=True) if not ok]
+        if failed:
+            flash(
+                request,
+                f"Sent to {len(targets) - len(failed)} of {len(targets)}; failed: {', '.join(failed)}.",
+                bad=True,
+            )
+        else:
+            flash(request, f"Sent a test to {len(targets)} target{'s' if len(targets) != 1 else ''}.")
+        return RedirectResponse("/maintenance#notifications", status_code=303)
+
     # --- API ------------------------------------------------------------------------
 
     @app.post("/api/tokens", response_class=HTMLResponse)
@@ -627,14 +736,14 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         section, token, errors = api.create(load_state(), form.get("name") or "", form.get("scope") or "")
         if errors:
             flash(request, f"Token not created: {'; '.join(errors)}.", bad=True)
-            return RedirectResponse("/#api", status_code=303)
+            return RedirectResponse("/maintenance#api", status_code=303)
         save_section(settings.state_dir, "api", section)
         return TEMPLATES.TemplateResponse(
             request,
             "api_token.html",
             {
                 "user": user,
-                "page": "status",
+                "page": "maintenance",
                 "csrf": csrf_token(request),
                 "token": token,
                 "entry": section["tokens"][-1],
@@ -653,7 +762,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if gone:
             save_section(settings.state_dir, "api", {"tokens": [t for t in items if t.get("id") != token_id]})
             flash(request, f"Deleted token {gone[0].get('name')}; it stops working now.")
-        return RedirectResponse("/#api", status_code=303)
+        return RedirectResponse("/maintenance#api", status_code=303)
 
     def api_auth(request: Request, need: str) -> tuple[dict | None, JSONResponse | None]:
         token, error = api.authenticate(load_state(), request.headers.get("authorization"), need)
@@ -675,7 +784,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         pipe = (status or {}).get("pipe") or {}
         return JSONResponse(
             {
-                "warnings": router_warnings(status, state_applied(settings.state_dir)) + warnings(raw_state, traffic),
+                "warnings": [{k: w[k] for k in ("kind", "level", "text")} for w in current_warnings(raw_state)],
                 "status_updated": (status or {}).get("updated"),
                 "router_error": (status or {}).get("error"),
                 "exits": [
@@ -732,7 +841,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         passphrase = form.get("passphrase") or ""
         if passphrase != (form.get("passphrase2") or ""):
             flash(request, "Backup: the passphrases don't match.", bad=True)
-            return RedirectResponse("/#backup", status_code=303)
+            return RedirectResponse("/maintenance#backup", status_code=303)
         data = backup.export(load_state(), passphrase)
         name = f"vpn-egress-backup-{today().isoformat()}.json"
         return Response(
@@ -747,7 +856,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             "backup_preview.html",
             {
                 "user": user,
-                "page": "status",
+                "page": "maintenance",
                 "csrf": csrf_token(request),
                 "created": created,
                 "errors": errors,
@@ -771,7 +880,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             state, created = backup.read(raw, form.get("passphrase") or "")
         except backup.BackupError as exc:
             flash(request, f"Backup not read: {exc}.", bad=True)
-            return RedirectResponse("/#backup", status_code=303)
+            return RedirectResponse("/maintenance#backup", status_code=303)
         errors = backup.check(state, pipe_status().get("addresses"))
         if errors:
             backup.drop_pending(settings.state_dir)
@@ -790,7 +899,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         else:
             backup.restore(settings.state_dir, pending[0])
             flash(request, f"Restored the backup from {pending[1] or 'an unknown date'}.")
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/maintenance#backup", status_code=303)
 
     @app.post("/backup/cancel")
     async def backup_cancel(request: Request):
@@ -799,7 +908,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             return form
         request.session.pop("restore", None)
         backup.drop_pending(settings.state_dir)
-        return RedirectResponse("/#backup", status_code=303)
+        return RedirectResponse("/maintenance#backup", status_code=303)
 
     @app.post("/backup/undo")
     async def backup_undo(request: Request):
@@ -811,7 +920,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             flash(request, f"Put back the settings as they were before the restore ({when}).")
         else:
             flash(request, "There is nothing to undo.", bad=True)
-        return RedirectResponse("/", status_code=303)
+        return RedirectResponse("/maintenance#backup", status_code=303)
 
     @app.post("/exits/{exit_id}/edit", response_class=HTMLResponse)
     async def exits_edit(request: Request, exit_id: int):
