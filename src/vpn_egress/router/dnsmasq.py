@@ -5,16 +5,19 @@ from __future__ import annotations
 import signal
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 
 from .config import Config
 
 
-def render(cfg: Config) -> str:
+def render(cfg: Config, log_queries: bool = False) -> str:
     run = cfg.run_dir
     lines = [
         "# Written by vpn-egress.",
         "keep-in-foreground",
         "log-facility=-",
+        *(["log-queries=extra"] if log_queries else []),
         "pid-file=",
         f"interface={cfg.pipe_iface}",
         "except-interface=lo",
@@ -36,8 +39,11 @@ def render(cfg: Config) -> str:
 
 
 class Dnsmasq:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, on_line: Callable[[str], bool] | None = None):
+        """on_line: gets each log line (the query log when set); lines it
+        doesn't take go to the router's own log."""
         self.cfg = cfg
+        self.on_line = on_line
         self.conf = cfg.run_dir / "dnsmasq.conf"
         self.proc: subprocess.Popen | None = None
 
@@ -47,7 +53,7 @@ class Dnsmasq:
         self.cfg.run_dir.mkdir(parents=True, exist_ok=True)
         for d in (self.cfg.data_dir, self.cfg.run_dir):
             d.chmod(0o755)
-        self.conf.write_text(render(self.cfg))
+        self.conf.write_text(render(self.cfg, log_queries=self.on_line is not None))
         for name in ("servers.conf", "lists.conf"):
             path = self.cfg.run_dir / name
             if not path.exists():
@@ -63,7 +69,28 @@ class Dnsmasq:
     def start(self) -> None:
         if self.alive():
             return
-        self.proc = subprocess.Popen(["dnsmasq", f"--conf-file={self.conf}"], stdout=sys.stdout, stderr=sys.stderr)
+        if self.on_line is None:
+            self.proc = subprocess.Popen(["dnsmasq", f"--conf-file={self.conf}"], stdout=sys.stdout, stderr=sys.stderr)
+            return
+        self.proc = subprocess.Popen(
+            ["dnsmasq", f"--conf-file={self.conf}"],
+            stdout=sys.stdout,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+            bufsize=1,
+        )
+        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
+
+    def _read(self, proc: subprocess.Popen) -> None:
+        for line in proc.stderr:
+            try:
+                taken = self.on_line(line)
+            except Exception:  # a parsing bug must not stop dnsmasq's output
+                taken = False
+            if not taken:
+                sys.stderr.write(line)
+                sys.stderr.flush()
 
     def stop(self) -> None:
         if self.proc and self.proc.poll() is None:

@@ -10,7 +10,7 @@ import sys
 import time
 import traceback
 
-from . import blocklists, firewall, traffic
+from . import blocklists, firewall, live, traffic
 from . import pipe as pipe_mod
 from .apply import StateError, apply, required_sources, validate
 from .config import Config, ConfigError
@@ -44,7 +44,22 @@ def main() -> int:
     signal.signal(signal.SIGTERM, lambda *_: stop.append(True))
     signal.signal(signal.SIGINT, lambda *_: stop.append(True))
 
-    dns = Dnsmasq(cfg)
+    live_log = live.LiveLog(cfg.pipe_addresses) if cfg.live_log else None
+    dns = Dnsmasq(cfg, on_line=live_log.feed_dns if live_log else None)
+    conntrack = live.Conntrack(live_log) if live_log else None
+    publisher = live.Publisher(live_log, cfg.state_dir, cfg.state_uid) if live_log else None
+    conntrack_retry = [0.0]
+
+    def keep_conntrack() -> None:
+        if conntrack is None or conntrack.alive() or time.monotonic() < conntrack_retry[0]:
+            return
+        err = conntrack.start()
+        if err:
+            log(f"live log: {err}; connections are not shown (retrying in 5 min)")
+            conntrack_retry[0] = time.monotonic() + 300
+        else:
+            conntrack_retry[0] = time.monotonic() + 30  # if it exits right away, don't spin
+
     dns.prepare()
     cache = SourceCache(cfg.data_dir / "sources", cfg.geoip_url, cfg.asn_url)
 
@@ -83,7 +98,7 @@ def main() -> int:
 
     def do_apply(reason: str) -> None:
         try:
-            status = apply(cfg, dns, last_routes, cache, last_pipe)
+            status = apply(cfg, dns, last_routes, cache, last_pipe, live_log)
             if status["error"]:
                 log(f"apply ({reason}): {status['error']}")
             exits_waiting[0] = any(e["enabled"] and not e["up"] for e in status["exits"])
@@ -115,6 +130,12 @@ def main() -> int:
 
     while not stop:
         time.sleep(POLL)
+        keep_conntrack()
+        if publisher:
+            try:
+                publisher.tick()
+            except OSError as exc:
+                log(f"live log: {exc}")
         if not dns.alive():
             log("dnsmasq exited; restarting")
             dns.start()
@@ -150,6 +171,10 @@ def main() -> int:
             last_sources = last_apply = now
 
     log("stopping")
+    if conntrack:
+        conntrack.stop()
+    if publisher:
+        (cfg.state_dir / "live.json").unlink(missing_ok=True)
     do_traffic()
     dns.stop()
     return 0

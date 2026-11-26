@@ -63,6 +63,7 @@ class Config:
     pipe_client_mtu: int
     traffic_iface: str = ""
     traffic_allowance: int = 0
+    live_log: bool = True
 
     @property
     def run_dir(self) -> Path:
@@ -123,6 +124,7 @@ class Config:
                 pipe_endpoint=endpoint,
                 pipe_client_mtu=int(get("EGRESS_PIPE_CLIENT_MTU", "1280")),
                 traffic_iface=traffic_iface,
+                live_log=_bool(get("EGRESS_LIVE_LOG", "true")),
                 traffic_allowance=_size(allowance) if allowance else 0,
             )
         except ValueError as exc:

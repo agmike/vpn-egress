@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 
 import pytest
@@ -402,3 +403,91 @@ def test_traffic_allowance_setting():
     assert Config.from_env({}).traffic_allowance == 0
     with pytest.raises(ConfigError):
         Config.from_env({"EGRESS_TRAFFIC_ALLOWANCE": "lots"})
+
+
+DNS_LOG = """\
+dnsmasq[9]: started, version 2.91 cachesize 10000
+dnsmasq[9]: 1 10.66.0.2/54687 query[A] www.example.com from 10.66.0.2
+dnsmasq[9]: 1 10.66.0.2/54687 forwarded www.example.com to 10.64.0.1
+dnsmasq[9]: 1 10.66.0.2/54687 reply www.example.com is <CNAME>
+dnsmasq[9]: 1 10.66.0.2/54687 reply edge.example.net is 198.51.100.7
+dnsmasq[9]: 2 10.66.0.2/37293 query[A] www.example.com from 10.66.0.2
+dnsmasq[9]: 2 10.66.0.2/37293 cached www.example.com is 198.51.100.7
+dnsmasq[9]: 3 10.66.0.3/58903 query[A] ads.example.org from 10.66.0.3
+dnsmasq[9]: 3 10.66.0.3/58903 config ads.example.org is NXDOMAIN
+dnsmasq[9]: 4 10.66.0.2/42971 query[AAAA] nothing.invalid from 10.66.0.2
+dnsmasq[9]: 4 10.66.0.2/42971 forwarded nothing.invalid to 9.9.9.9
+dnsmasq[9]: 4 10.66.0.2/42971 reply nothing.invalid is NXDOMAIN
+"""
+
+CT_LOG = """\
+[1795714922.327640]\t    [NEW] tcp      6 120 SYN_SENT src=10.66.0.2 dst=198.51.100.7 sport=50000 dport=443 \
+[UNREPLIED] src=198.51.100.7 dst=10.64.0.2 sport=443 dport=50000 mark=16777217
+[1795714923.1]\t    [NEW] udp      17 30 src=10.66.0.2 dst=203.0.113.9 sport=40000 dport=443 \
+[UNREPLIED] src=203.0.113.9 dst=192.0.2.10 sport=443 dport=40000 mark=16777216
+[1795714924.2]\t    [NEW] udp      17 30 src=10.66.0.2 dst=9.9.9.9 sport=40001 dport=53 \
+[UNREPLIED] src=10.66.0.1 dst=10.66.0.2 sport=53 dport=40001 mark=16777216
+[1795714925.3]\t    [NEW] icmp     1 30 src=10.66.0.3 dst=192.168.10.5 type=8 code=0 id=3 \
+[UNREPLIED] src=192.168.10.5 dst=10.66.0.3 type=0 code=0 id=3 mark=16777216
+"""
+
+
+def test_live_log_dns_and_connections(tmp_path):
+    import ipaddress
+    import time
+
+    from vpn_egress.router.live import LiveLog, Publisher
+
+    log = LiveLog((ipaddress.ip_interface("10.66.0.1/24"),))
+    log.view = {
+        "domains": {"example.com": 1, "jp": 2},
+        "exit_addrs": {"10.64.0.2": 1},
+        "pipe_nets": [ipaddress.ip_network("192.168.10.0/24")],
+    }
+    taken = [log.feed_dns(line) for line in DNS_LOG.splitlines()]
+    assert taken[0] is False and all(taken[1:])  # other lines go to the router's log
+    first, cached, blocked, nx = log.dns
+    assert (first["name"], first["client"], first["list"], first["result"]) == (
+        "www.example.com",
+        "10.66.0.2",
+        1,
+        "answered",
+    )
+    assert first["server"] == "10.64.0.1" and first["answers"] == ["198.51.100.7"]
+    assert cached["result"] == "cached" and blocked["result"] == "blocked" and blocked["list"] is None
+    assert nx["result"] == "nxdomain" and nx["type"] == "AAAA"
+    assert log.list_for("shop.co.jp") == 2 and log.list_for("example.org") is None
+
+    for line in CT_LOG.splitlines():
+        log.feed_conn(line)
+    via_exit, direct, peer = log.conns  # the DNS to the server itself is left out
+    assert (via_exit["name"], via_exit["list"], via_exit["via"], via_exit["port"]) == ("www.example.com", 1, 1, 443)
+    assert (direct["list"], direct["via"], direct["name"]) == (None, "direct", None)
+    assert peer["via"] == "pipe" and peer["proto"] == "icmp" and peer["port"] is None
+
+    pub = Publisher(log, tmp_path, os.getuid())
+    pub.tick()
+    assert not (tmp_path / "live.json").exists()  # nobody is watching
+    (tmp_path / "live-watch").touch()
+    pub.tick()
+    snap = json.loads((tmp_path / "live.json").read_text())
+    assert snap["dns"][0]["name"] == "nothing.invalid" and len(snap["conns"]) == 3  # newest first
+    old = time.time() - 60
+    os.utime(tmp_path / "live-watch", (old, old))
+    pub.tick()
+    assert not (tmp_path / "live.json").exists()
+
+
+def test_live_view_first_match_and_dnsmasq_query_log():
+    from vpn_egress.router.dnsmasq import render
+
+    raw = state()
+    raw["lists"] = [
+        {"id": 1, "name": "a", "exit": 3, "entries": ["example.com"]},
+        {"id": 2, "name": "b", "exit": "direct", "entries": ["www.example.com", "example.org", "jp"]},
+    ]
+    view = apply.live_view(apply.validate(raw), {"peers": [{"networks": ["192.168.10.0/24"]}]})
+    assert view["domains"] == {"example.com": 1, "example.org": 2, "jp": 2}
+    assert view["exit_addrs"] == {"10.64.0.2": 3, "fd00:64::2": 3}
+    assert [str(n) for n in view["pipe_nets"]] == ["192.168.10.0/24"]
+    assert "log-queries=extra" in render(cfg(), log_queries=True) and "log-queries" not in render(cfg())

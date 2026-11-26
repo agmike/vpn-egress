@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Live · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <div id="note" class="notice" hidden></div>
+
+  <section>
+    <h2>Live</h2>
+    <p class="muted">Recent DNS queries and new connections from pipe clients, newest first; kept in the router's
+      memory only, and handed to this page only while it's open.</p>
+    <div class="inline-fields">
+      <div class="tabs">
+        <button type="button" data-tab="dns" class="primary">DNS</button>
+        <button type="button" data-tab="conns">Connections</button>
+      </div>
+      <label>Filter <input type="text" id="filter" placeholder="name, address, list…" style="width: 200px"></label>
+      <label>Client <select id="client"><option value="">all</option></select></label>
+      <label class="check" id="blocked-wrap"><input type="checkbox" id="blocked"> blocked only</label>
+      <button type="button" id="pause">Pause</button>
+    </div>
+    <p class="muted" id="state">Loading…</p>
+
+    <div id="action" class="action" hidden>
+      <div class="inline-fields">
+        <label>Add <select id="act-entry"></select></label>
+        <label>to <select id="act-list"></select></label>
+        <button type="button" class="primary" id="act-add">Add</button>
+        <button type="button" id="act-cancel">Cancel</button>
+      </div>
+      <p class="muted">A domain covers its subdomains. The list's sets fill as the name is looked up again; open
+        connections keep their route.</p>
+    </div>
+
+    <div class="scroll"><table id="table"></table></div>
+  </section>
+</main>
+<script>
+(function () {
+  const csrf = {{ csrf | tojson }};
+  let tab = "dns", paused = false, data = null, timer = null;
+  const $ = function (id) { return document.getElementById(id); };
+  const HEAD = {
+    dns: ["Time", "Client", "Name", "Result", "Route", ""],
+    conns: ["Time", "Client", "Destination", "Route", "Left via", ""],
+  };
+
+  function el(tag, text, cls) {
+    const e = document.createElement(tag);
+    if (text !== undefined && text !== null) e.textContent = text;
+    if (cls) e.className = cls;
+    return e;
+  }
+  function time(t) { return new Date(t * 1000).toLocaleTimeString([], { hour12: false }); }
+  function who(r) { return r.client_name ? r.client_name : r.client; }
+
+  function note(text, bad) {
+    const n = $("note");
+    n.textContent = text; n.className = "notice" + (bad ? " bad" : ""); n.hidden = false;
+  }
+
+  function suffixes(name) {
+    const parts = name.toLowerCase().replace(/\.$/, "").split(".");
+    const out = [];
+    for (let k = 0; k < parts.length - 1; k++) out.push(parts.slice(k).join("."));
+    return out;
+  }
+
+  function openAction(entries) {
+    const sel = $("act-entry"), lists = $("act-list");
+    sel.replaceChildren(); lists.replaceChildren();
+    entries.forEach(function (e) { const o = el("option", e); o.value = e; sel.appendChild(o); });
+    (data ? data.lists : []).forEach(function (l) { const o = el("option", l.name); o.value = l.id; lists.appendChild(o); });
+    if (!lists.options.length) { note("Make a list on the Routing page first.", true); return; }
+    $("action").hidden = false;
+    $("action").scrollIntoView({ block: "nearest" });
+  }
+
+  function post(url, fields) {
+    const body = new FormData();
+    body.append("csrf", csrf);
+    Object.keys(fields).forEach(function (k) { body.append(k, fields[k]); });
+    note("Saving…");
+    return fetch(url, { method: "POST", body: body, credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { note(d.message, !d.ok); return d; })
+      .catch(function () { note("Not saved: the panel didn't answer.", true); });
+  }
+
+  function link(text, onclick) {
+    const b = el("button", text, "link"); b.type = "button"; b.addEventListener("click", onclick); return b;
+  }
+
+  function matches(r, text) {
+    if (!text) return true;
+    const hay = [r.name, r.client, r.client_name, r.route, r.dst, r.via_label, r.result, (r.answers || []).join(" ")]
+      .join(" ").toLowerCase();
+    return hay.indexOf(text) !== -1;
+  }
+
+  function render() {
+    if (!data) return;
+    const table = $("table"), text = $("filter").value.trim().toLowerCase(), client = $("client").value;
+    const rows = (tab === "dns" ? data.dns : data.conns).filter(function (r) {
+      return matches(r, text) && (!client || who(r) === client) && (tab !== "dns" || !$("blocked").checked || r.result === "blocked");
+    });
+    const frag = document.createDocumentFragment();
+    const head = el("tr");
+    HEAD[tab].forEach(function (h) { head.appendChild(el("th", h)); });
+    frag.appendChild(head);
+    rows.slice(0, 300).forEach(function (r) {
+      const tr = el("tr");
+      tr.appendChild(el("td", time(r.t), "nowrap"));
+      const c = el("td", who(r), "nowrap"); c.title = r.client; tr.appendChild(c);
+      const actions = el("td", null, "actions");
+      if (tab === "dns") {
+        const n = el("td", null), nw = el("span");
+        nw.appendChild(el("span", r.name, "mono"));
+        nw.appendChild(el("span", " " + r.type, "muted"));
+        n.appendChild(nw);
+        if (r.answers && r.answers.length) n.title = r.answers.join(", ");
+        tr.appendChild(n);
+        const res = el("td", r.result, r.result === "blocked" ? "bad" : (r.result === "nxdomain" || r.result === "servfail") ? "warn" : "");
+        if (r.server) res.title = "asked " + r.server;
+        tr.appendChild(res);
+        tr.appendChild(el("td", r.route));
+        actions.appendChild(link("Add to list", function () { openAction(suffixes(r.name)); }));
+        if (r.result === "blocked") {
+          actions.appendChild(link("Allow", function () { post("/live/dns", { action: "allow", name: r.name }); }));
+        } else {
+          actions.appendChild(link("Block", function () {
+            if (confirm("Block " + r.name + " and its subdomains in DNS?")) post("/live/dns", { action: "block", name: r.name });
+          }));
+        }
+      } else {
+        const d = el("td", null), dw = el("span");
+        dw.appendChild(el("span", r.name || r.dst, "mono"));
+        dw.appendChild(el("span", (r.port ? " :" + r.port : "") + " " + r.proto, "muted"));
+        d.appendChild(dw);
+        d.title = r.dst + (r.port ? ":" + r.port : "");
+        tr.appendChild(d);
+        tr.appendChild(el("td", r.route));
+        tr.appendChild(el("td", r.via_label));
+        if (r.via !== "pipe") {
+          actions.appendChild(link("Add to list", function () { openAction((r.name ? suffixes(r.name) : []).concat([r.dst])); }));
+        }
+      }
+      tr.appendChild(actions);
+      frag.appendChild(tr);
+    });
+    if (!rows.length) {
+      const tr = el("tr"); const td = el("td", data.available ? "Nothing yet." : "Waiting for the router…", "muted");
+      td.colSpan = 6; tr.appendChild(td); frag.appendChild(tr);
+    }
+    table.replaceChildren(frag);
+    $("state").textContent = (paused ? "Paused · " : "") + rows.length + " shown" +
+      (data.updated ? " · router updated " + Math.max(0, data.now - data.updated) + " s ago" : "");
+  }
+
+  function clients() {
+    const sel = $("client"), have = new Set(Array.from(sel.options).map(function (o) { return o.value; }));
+    data.dns.concat(data.conns).forEach(function (r) {
+      const w = who(r);
+      if (!have.has(w)) { const o = el("option", w); o.value = w; sel.appendChild(o); have.add(w); }
+    });
+  }
+
+  function poll() {
+    clearTimeout(timer);
+    if (paused) return;
+    if (document.hidden) { timer = setTimeout(poll, 2000); return; }
+    fetch("/live/data", { credentials: "same-origin" })
+      .then(function (r) { if (r.status === 401) { location.reload(); } return r.json(); })
+      .then(function (d) { data = d; clients(); render(); })
+      .catch(function () { $("state").textContent = "The panel didn't answer; retrying…"; })
+      .finally(function () { timer = setTimeout(poll, 2000); });
+  }
+
+  document.querySelectorAll("[data-tab]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      tab = b.dataset.tab;
+      document.querySelectorAll("[data-tab]").forEach(function (x) { x.className = x === b ? "primary" : ""; });
+      $("blocked-wrap").hidden = tab !== "dns";
+      render();
+    });
+  });
+  ["filter", "client", "blocked"].forEach(function (id) { $(id).addEventListener("input", render); });
+  $("pause").addEventListener("click", function () {
+    paused = !paused; $("pause").textContent = paused ? "Resume" : "Pause";
+    if (paused) render(); else poll();
+  });
+  $("act-cancel").addEventListener("click", function () { $("action").hidden = true; });
+  $("act-add").addEventListener("click", function () {
+    post("/live/add", { entry: $("act-entry").value, list: $("act-list").value }).then(function (d) {
+      if (d && d.ok) $("action").hidden = true;
+    });
+  });
+  poll();
+})();
+</script>
+{% endblock %}

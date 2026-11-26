@@ -23,7 +23,9 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import api, backup, notify
+from . import live as live_mod
 from .state import (
+    DOMAIN_RE,
     LABEL_RE,
     allocate_addresses,
     dns_config,
@@ -34,6 +36,7 @@ from .state import (
     gen_obfuscation,
     list_from_form,
     next_id,
+    parse_entries,
     parse_expiry,
     parse_size,
     parse_wg_conf,
@@ -651,6 +654,77 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             save_section(settings.state_dir, "traffic", {"allowance": allowance})
             flash(request, f"Allowance set to {human_size(allowance)}." if allowance else "Allowance turned off.")
         return RedirectResponse("/", status_code=303)
+
+    # --- live log ---------------------------------------------------------------------
+
+    @app.get("/live", response_class=HTMLResponse)
+    async def live_page(request: Request):
+        user = current_user(request)
+        if user is None:
+            return RedirectResponse("/", status_code=303)
+        live_mod.touch_watch(settings.state_dir)
+        return TEMPLATES.TemplateResponse(
+            request, "live.html", {"user": user, "page": "live", "csrf": csrf_token(request)}
+        )
+
+    @app.get("/live/data")
+    async def live_data(request: Request):
+        if current_user(request) is None:
+            return JSONResponse({"error": "signed out"}, status_code=401)
+        live_mod.touch_watch(settings.state_dir)
+        return JSONResponse(live_mod.labelled(settings.state_dir, load_state()), headers={"Cache-Control": "no-store"})
+
+    async def live_form(request: Request):
+        user = current_user(request)
+        if user is None:
+            return None, JSONResponse({"ok": False, "message": "Signed out: reload the page."}, status_code=401)
+        form = await request.form()
+        if not csrf_ok(request, form):
+            return None, JSONResponse({"ok": False, "message": "Form expired: reload the page."}, status_code=400)
+        return form, None
+
+    @app.post("/live/add")
+    async def live_add(request: Request):
+        form, denied = await live_form(request)
+        if denied:
+            return denied
+        entry = (form.get("entry") or "").strip()
+        errors: list[str] = []
+        parse_entries(entry, errors)
+        if not entry or "\n" in entry or errors:
+            return JSONResponse({"ok": False, "message": errors[0] if errors else "Nothing to add."}, status_code=400)
+        lists = [l for l in load_state().get("lists", []) if isinstance(l, dict)]
+        try:
+            target = find(lists, int(form.get("list") or 0))
+        except ValueError:
+            target = None
+        if target is None:
+            return JSONResponse({"ok": False, "message": "Pick a list."}, status_code=400)
+        entries = target.pop("cidrs", None) or target.get("entries", [])
+        if entry.lower() in (e.split("#", 1)[0].strip().lower() for e in entries):
+            return JSONResponse({"ok": True, "message": f"{entry} is already on {target.get('name')}."})
+        target["entries"] = [*entries, entry]
+        save_section(settings.state_dir, "lists", lists)
+        return JSONResponse({"ok": True, "message": f"Added {entry} to {target.get('name')}."})
+
+    @app.post("/live/dns")
+    async def live_dns(request: Request):
+        form, denied = await live_form(request)
+        if denied:
+            return denied
+        name = (form.get("name") or "").strip().lower().rstrip(".")
+        action = form.get("action")
+        if action not in ("block", "allow") or not DOMAIN_RE.match(name):
+            return JSONResponse({"ok": False, "message": "Not a domain name."}, status_code=400)
+        config, _ = dns_config(settings.state_dir)
+        config = {"lists": config.get("lists", []), "block": config.get("block", []), "allow": config.get("allow", [])}
+        key = "block" if action == "block" else "allow"
+        if name in (e.split("#", 1)[0].strip().lower().removeprefix("*.") for e in config[key]):
+            return JSONResponse({"ok": True, "message": f"{name} is already there."})
+        config[key] = [*config[key], name]
+        save_section(settings.state_dir, "dns", config)
+        what = "Blocked" if action == "block" else "Never blocking"
+        return JSONResponse({"ok": True, "message": f"{what} {name} (and its subdomains) from now on; see DNS."})
 
     # --- maintenance: notifications, backup, API, versions ------------------------------
 

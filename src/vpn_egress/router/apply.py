@@ -528,7 +528,7 @@ def learned_counts(list_id: int) -> dict[str, int]:
 # --- dnsmasq ------------------------------------------------------------------------
 
 
-def _covered(domain: str, claimed: set[str]) -> bool:
+def _covered(domain: str, claimed: set[str] | dict) -> bool:
     labels = domain.split(".")
     return any(".".join(labels[k:]) in claimed for k in range(len(labels)))
 
@@ -585,8 +585,31 @@ def sync_dnsmasq(cfg: Config, state: dict, exit_up: dict[int, bool], dns: Dns) -
 # --- status / main -------------------------------------------------------------------
 
 
+def live_view(state: dict, pipe: dict | None) -> dict:
+    """What the live log needs to label records: which list claims a name
+    (first match wins, as in render_dnsmasq), which exit an address is, and
+    the networks behind pipe peers."""
+    domains: dict[str, int] = {}
+    for lst in state["lists"]:
+        for d in lst["domains"]:
+            if not _covered(d, domains):  # a dict: membership like the set in render_dnsmasq
+                domains[d] = lst["id"]
+    exit_addrs = {}
+    for eid, ex in state["exits"].items():
+        for a in (ex["address"], ex["address6"]):
+            if a:
+                exit_addrs[a.split("/")[0]] = eid
+    nets = [ipaddress.ip_network(n) for p in (pipe or {}).get("peers", []) for n in p.get("networks", [])]
+    return {"domains": domains, "exit_addrs": exit_addrs, "pipe_nets": nets}
+
+
 def apply(
-    cfg: Config, dns: Dns, last_routes: list[str], cache: SourceCache | None = None, last_pipe: list[str] | None = None
+    cfg: Config,
+    dns: Dns,
+    last_routes: list[str],
+    cache: SourceCache | None = None,
+    last_pipe: list[str] | None = None,
+    live=None,
 ) -> dict:
     status = {"updated": int(time.time()), "error": None, "exits": [], "lists": [], "versions": versions(cfg.pipe_tool)}
     state_file = cfg.state_dir / "state.json"
@@ -667,6 +690,8 @@ def apply(
                 "learned6": learned["6"],
             }
         )
+    if live is not None:
+        live.view = live_view(state, pipe)
     status["default"] = {"exit": state["default"]["exit"], "when_down": state["default"]["when_down"]}
     status["pipe"] = pipe_mod.status(cfg, pipe)
     write_json(cfg.state_dir / "status.json", status, cfg.state_uid)

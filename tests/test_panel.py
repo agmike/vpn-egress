@@ -926,3 +926,90 @@ def test_maintenance_page_notify_targets_and_versions(tmp_path):
     assert "Sent to 0 of 1; failed" in r.text and secret not in r.text
     client.post("/maintenance/notify/0/delete", data={"csrf": token})
     assert state_of(tmp_path)["notify"] == {"urls": []}
+
+
+def test_live_page_data_and_actions(tmp_path):
+    client, token = pipe_ready(tmp_path)
+    client.post("/pipe/peers", data={"csrf": token, "name": "Phone"})
+    client.post("/pipe/peers", data={"csrf": token, "name": "Home", "public_key": "", "networks": "192.168.10.0/24"})
+    add_exit(client, "nl")
+    client.post("/routing/add", data={"csrf": token, "name": "video", "exit": "1", "entries": "example.com"})
+    (tmp_path / "live.json").write_text(
+        json.dumps(
+            {
+                "updated": int(time.time()),
+                "dns": [
+                    {
+                        "t": 1,
+                        "client": "10.66.0.2",
+                        "type": "A",
+                        "name": "www.example.com",
+                        "result": "answered",
+                        "server": None,
+                        "answers": ["198.51.100.7"],
+                        "list": 1,
+                    },
+                    {
+                        "t": 2,
+                        "client": "192.168.10.20",
+                        "type": "A",
+                        "name": "ads.example.org",
+                        "result": "blocked",
+                        "server": None,
+                        "answers": [],
+                        "list": None,
+                    },
+                ],
+                "conns": [
+                    {
+                        "t": 3,
+                        "proto": "tcp",
+                        "client": "10.66.0.2",
+                        "dst": "198.51.100.7",
+                        "port": 443,
+                        "name": "www.example.com",
+                        "list": 1,
+                        "via": 1,
+                    },
+                    {
+                        "t": 4,
+                        "proto": "icmp",
+                        "client": "10.66.0.2",
+                        "dst": "192.168.10.5",
+                        "port": None,
+                        "name": None,
+                        "list": None,
+                        "via": "pipe",
+                    },
+                ],
+            }
+        )
+    )
+    assert 'href="/live" class="active"' in client.get("/live").text
+    assert (tmp_path / "live-watch").exists()
+    d = client.get("/live/data").json()
+    assert [(r["client_name"], r["route"]) for r in d["dns"]] == [
+        ("Phone", "video → nl"),
+        ("Home", "Everything else → This server"),  # a client on the network behind the Home peer
+    ]
+    assert [(r["route"], r["via_label"]) for r in d["conns"]] == [("video → nl", "nl"), ("Pipe peer", "Pipe")]
+    assert d["lists"] == [{"id": 1, "name": "video"}]
+
+    r = client.post("/live/add", data={"csrf": token, "list": "1", "entry": "example.net"})
+    assert r.json() == {"ok": True, "message": "Added example.net to video."}
+    assert state_of(tmp_path)["lists"][0]["entries"] == ["example.com", "example.net"]
+    assert (
+        "already on video" in client.post("/live/add", data={"csrf": token, "list": "1", "entry": "EXAMPLE.net"}).text
+    )
+    assert client.post("/live/add", data={"csrf": token, "list": "1", "entry": "no such thing!"}).status_code == 400
+    assert client.post("/live/add", data={"csrf": token, "list": "9", "entry": "example.org"}).status_code == 400
+    assert client.post("/live/add", data={"csrf": "x", "list": "1", "entry": "example.org"}).status_code == 400
+
+    r = client.post("/live/dns", data={"csrf": token, "action": "allow", "name": "ads.example.org"})
+    assert r.json()["ok"] and state_of(tmp_path)["dns"]["allow"] == ["ads.example.org"]
+    client.post("/live/dns", data={"csrf": token, "action": "block", "name": "tracker.example.net"})
+    assert state_of(tmp_path)["dns"]["block"][-1] == "tracker.example.net"  # added to the seed's
+    assert client.post("/live/dns", data={"csrf": token, "action": "block", "name": "x;y"}).status_code == 400
+
+    signed_out = TestClient(client.app)
+    assert signed_out.get("/live/data").status_code == 401

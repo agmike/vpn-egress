@@ -43,7 +43,7 @@ LABEL org.opencontainers.image.title="vpn-egress-router" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}"
 RUN apt-get update \
- && apt-get install -y --no-install-recommends iproute2 nftables wireguard-tools dnsmasq-base \
+ && apt-get install -y --no-install-recommends iproute2 nftables wireguard-tools dnsmasq-base conntrack \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=awg /awg /usr/local/bin/awg
 COPY --from=build-router /venv /venv
