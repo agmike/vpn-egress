@@ -1030,3 +1030,57 @@ def test_live_watch_replaces_a_file_it_cannot_touch(tmp_path, monkeypatch):
     monkeypatch.setattr(live.os, "utime", utime)
     live.touch_watch(tmp_path)
     assert (tmp_path / "live-watch").exists() and utime.done
+
+
+def test_live_lookup_labels_the_routers_answer(tmp_path):
+    import socket
+    import threading
+
+    client, token = pipe_ready(tmp_path)
+    add_exit(client, "nl")
+    client.post("/routing/add", data={"csrf": token, "name": "japan", "exit": "1", "entries": "JP\nexample.co.jp"})
+    assert client.get("/live/lookup?q=192.0.2.1").status_code == 503  # no router socket
+
+    answer = {
+        "query": "www.example.co.jp",
+        "kind": "domain",
+        "claim": 1,
+        "error": None,
+        "databases": {"country": 1, "asn": 1},
+        "addresses": [
+            {
+                "ip": "203.0.113.9",
+                "geoip": {"code": "JP", "prefix": "203.0.113.0/24"},
+                "asn": {"number": 64500, "org": "Example KK", "prefix": "203.0.112.0/20"},
+                "matches": [{"list": 1, "reasons": [{"kind": "geoip", "name": "JP"}, {"kind": "learned"}]}],
+                "route": 1,
+            },
+            {
+                "ip": "192.0.2.1",
+                "geoip": {"code": None, "prefix": None},
+                "asn": {"number": None},
+                "matches": [],
+                "route": "default",
+            },
+        ],
+    }
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(str(tmp_path / "lookup.sock"))
+    srv.listen(1)
+    got = []
+
+    def serve():
+        conn, _ = srv.accept()
+        with conn, conn.makefile("rwb") as f:
+            got.append(json.loads(f.readline()))
+            f.write((json.dumps(answer) + "\n").encode())
+
+    threading.Thread(target=serve, daemon=True).start()
+    d = client.get("/live/lookup?q=www.example.co.jp").json()
+    srv.close()
+    assert got == [{"q": "www.example.co.jp"}]
+    assert d["claim_label"] == "japan → nl"
+    first, other = d["addresses"]
+    assert first["matches"] == [{"list": "japan", "first": True, "why": ["GeoIP JP", "learned from DNS"]}]
+    assert first["route_label"] == "japan → nl" and other["route_label"] == "Everything else → This server"
+    assert 'id="lookup-q"' in client.get("/live").text

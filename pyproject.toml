@@ -5,7 +5,9 @@ description = "Route domains and IPs through multiple WireGuard VPN exits, from 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "maxminddb>=3.3,<4",
+]
 
 [project.optional-dependencies]
 panel = [

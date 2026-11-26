@@ -44,6 +44,10 @@ picked per domain or IP list in a small web panel.
   peer name), the result (answered, cached, blocked), the list and exit that routed it; add a name
   or address to a list, block it or let a blocked one through, from the row. Kept in the router's
   memory only (the last 1000 of each) and handed to the panel only while the page is open.
+  **Look up** (a row, or any address or domain): GeoIP code and network (ASN, organisation,
+  prefix) from MetaCubeX's `country.mmdb` and `GeoLite2-ASN.mmdb` (downloaded daily, ~17 MB),
+  every list that matches the address and why (a typed range, a GeoIP/ASN/URL source, learned
+  from DNS), and where a new connection to it goes.
 - **Notifications:** through [Apprise](https://github.com/caronc/apprise) (Telegram, ntfy,
   email, Discord, … — any number of targets, shown masked): an exit down for two minutes, the
   router silent or failing, an exit config 30/7/1 days from expiring, traffic at 80%/100% of
@@ -118,7 +122,8 @@ Router:
 | `EGRESS_PIPE_PORT` / `EGRESS_PIPE_MTU` | `51820` / `1380` | |
 | `EGRESS_PIPE_ADDRESSES` | `10.66.0.1/24,fd66::1/64` | server addresses; peers get addresses from these subnets |
 | `EGRESS_PIPE_ENDPOINT` / `EGRESS_PIPE_CLIENT_MTU` | — / `1280` | `host:port` and MTU written into client configs |
-| `EGRESS_LIVE_LOG` | `true` | dnsmasq query log and conntrack events for the Live page (memory only) |
+| `EGRESS_LIVE_LOG` | `true` | dnsmasq query log and conntrack events for the Live page (memory only), and lookups |
+| `EGRESS_COUNTRY_DB_URL` / `EGRESS_ASN_DB_URL` | MetaCubeX `country.mmdb` / `GeoLite2-ASN.mmdb` | lookup databases (`off` to go without) |
 | `EGRESS_TRAFFIC_IFACE` | default route's | interface the transfer meter counts |
 | `EGRESS_TRAFFIC_ALLOWANCE` | — | monthly outbound allowance, e.g. `10TB` (decimal units), until one is set in the panel |
 

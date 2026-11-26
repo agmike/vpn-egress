@@ -100,3 +100,68 @@ def labelled(state_dir: Path, state: dict) -> dict:
         "conns": conns,
         "lists": [{"id": l.get("id"), "name": l.get("name")} for l in lists.values()],
     }
+
+
+def ask_router(state_dir: Path, query: str, timeout: float = 20.0) -> dict:
+    """A lookup, answered by the router over its socket (see router/lookup.py)."""
+    import json
+    import socket
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(str(state_dir / "lookup.sock"))
+        s.sendall((json.dumps({"q": query}) + "\n").encode())
+        with s.makefile("rb") as f:
+            return json.loads(f.readline(1 << 20) or b"{}")
+
+
+REASONS = {"range": "a range on the list", "learned": "learned from DNS", "geoip": "GeoIP", "asn": "", "url": "list"}
+
+
+def label_lookup(result: dict, state: dict) -> dict:
+    """List ids → names, routes → "list → exit"."""
+    exits = {e.get("id"): str(e.get("name")) for e in state.get("exits", []) if isinstance(e, dict)}
+    lists = {l.get("id"): l for l in state.get("lists", []) if isinstance(l, dict)}
+    default = (state.get("default") or {}).get("exit", "direct") if isinstance(state.get("default"), dict) else "direct"
+
+    def exit_name(ref) -> str:
+        return SPECIAL.get(ref) or exits.get(ref) or "?"
+
+    def list_name(lid) -> str:
+        return str((lists.get(lid) or {}).get("name", f"list {lid}"))
+
+    def reason(r: dict) -> str:
+        if r["kind"] == "url":
+            return "list " + r["name"].split("/")[2]
+        return " ".join(x for x in (REASONS.get(r["kind"], r["kind"]), r.get("name")) if x)
+
+    out = dict(result)
+    if result.get("claim") is not None:
+        out["claim_label"] = (
+            f"{list_name(result['claim'])} → {exit_name((lists.get(result['claim']) or {}).get('exit'))}"
+        )
+    addresses = []
+    for a in result.get("addresses") or []:
+        route = a.get("route")
+        if route == "local":
+            route_label = "stays local (private or local address)"
+        elif route == "default":
+            route_label = f"Everything else → {exit_name(default)}"
+        else:
+            route_label = f"{list_name(route)} → {exit_name((lists.get(route) or {}).get('exit'))}"
+        addresses.append(
+            {
+                **a,
+                "route_label": route_label,
+                "matches": [
+                    {
+                        "list": list_name(m["list"]),
+                        "first": m["list"] == route,
+                        "why": [reason(r) for r in m["reasons"]],
+                    }
+                    for m in a.get("matches") or []
+                ],
+            }
+        )
+    out["addresses"] = addresses
+    return out

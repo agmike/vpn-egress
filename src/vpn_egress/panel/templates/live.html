@@ -19,7 +19,16 @@
       <label class="check" id="blocked-wrap"><input type="checkbox" id="blocked"> Blocked only</label>
       <button type="button" id="pause">Pause</button>
     </div>
+    <form class="toolbar" id="lookup-form">
+      <input type="text" id="lookup-q" placeholder="Look up an address or domain" aria-label="Look up" spellcheck="false">
+      <button type="submit">Look up</button>
+    </form>
     <p class="muted" id="state">Loading…</p>
+
+    <div id="lookup" class="action" hidden>
+      <div class="lookup-head"><b id="lookup-title"></b> <button type="button" class="link" id="lookup-close">Close</button></div>
+      <div id="lookup-body"></div>
+    </div>
 
     <div id="action" class="action" hidden>
       <div class="inline-fields">
@@ -90,6 +99,55 @@
     $("action").scrollIntoView({ block: "nearest" });
   }
 
+  function kv(table, key, value) {
+    const tr = el("tr"); tr.appendChild(el("td", key, "muted"));
+    const td = el("td"); if (typeof value === "string") td.textContent = value; else td.appendChild(value);
+    tr.appendChild(td); table.appendChild(tr);
+  }
+
+  function showLookup(d) {
+    const body = $("lookup-body");
+    body.replaceChildren();
+    $("lookup-title").textContent = d.query || "Lookup";
+    if (d.claim_label) body.appendChild(el("p", "The name is on " + d.claim_label + "; its addresses follow it once looked up."));
+    if (d.kind === "domain" && d.addresses && d.addresses.length) body.appendChild(el("p", "Resolved through this server's DNS, as clients see it:", "muted"));
+    if (d.error) body.appendChild(el("p", d.error, "bad"));
+    (d.addresses || []).forEach(function (a) {
+      const t = el("table", null, "format");
+      const ip = el("span"); ip.appendChild(whois(a.ip));
+      kv(t, "Address", ip);
+      kv(t, "GeoIP", a.geoip.code ? a.geoip.code + "  (" + a.geoip.prefix + ")" : "unknown");
+      kv(t, "Network", a.asn.number ? "AS" + a.asn.number + " " + (a.asn.org || "") + "  (" + a.asn.prefix + ")" : "unknown");
+      const lists = el("span");
+      if (!a.matches.length) lists.textContent = "none";
+      a.matches.forEach(function (m, i) {
+        const line = el("div");
+        line.appendChild(el("b", m.list));
+        line.appendChild(el("span", ": " + m.why.join(", ") + (m.first ? "  ← first match" : ""), m.first ? "" : "muted"));
+        lists.appendChild(line);
+      });
+      kv(t, "Your lists", lists);
+      kv(t, "New connections", a.route_label);
+      body.appendChild(t);
+    });
+    const db = d.databases || {};
+    if (d.addresses && d.addresses.length && (!db.country || !db.asn)) {
+      body.appendChild(el("p", "GeoIP or network databases not downloaded yet; the router fetches them in the background.", "muted"));
+    }
+    $("lookup").hidden = false;
+    $("lookup").scrollIntoView({ block: "nearest" });
+  }
+
+  function lookup(q) {
+    $("lookup-title").textContent = q;
+    $("lookup-body").replaceChildren(el("p", "Looking up…", "muted"));
+    $("lookup").hidden = false;
+    fetch("/live/lookup?q=" + encodeURIComponent(q), { credentials: "same-origin" })
+      .then(function (r) { return r.json(); })
+      .then(showLookup)
+      .catch(function () { showLookup({ query: q, error: "The panel didn't answer." }); });
+  }
+
   function post(url, fields) {
     const body = new FormData();
     body.append("csrf", csrf);
@@ -149,6 +207,7 @@
         if (r.server) res.title = "asked " + r.server;
         tr.appendChild(res);
         tr.appendChild(el("td", r.route));
+        actions.appendChild(link("Look up", function () { lookup(r.name); }));
         actions.appendChild(link("Add to list", function () { openAction(suffixes(r.name)); }));
         if (r.result === "blocked") {
           actions.appendChild(link("Allow", function () { post("/live/dns", { action: "allow", name: r.name }); }));
@@ -168,6 +227,7 @@
         tr.appendChild(el("td", r.route));
         tr.appendChild(el("td", r.via_label));
         if (r.via !== "pipe") {
+          actions.appendChild(link("Look up", function () { lookup(r.dst); }));
           actions.appendChild(link("Add to list", function () { openAction((r.name ? suffixes(r.name) : []).concat([r.dst])); }));
         }
       }
@@ -216,6 +276,12 @@
     if (paused) render(); else poll();
   });
   $("act-cancel").addEventListener("click", function () { $("action").hidden = true; });
+  $("lookup-close").addEventListener("click", function () { $("lookup").hidden = true; });
+  $("lookup-form").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    const q = $("lookup-q").value.trim();
+    if (q) lookup(q);
+  });
   $("act-add").addEventListener("click", function () {
     post("/live/add", { entry: $("act-entry").value, list: $("act-list").value }).then(function (d) {
       if (d && d.ok) $("action").hidden = true;

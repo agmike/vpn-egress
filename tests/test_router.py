@@ -491,3 +491,120 @@ def test_live_view_first_match_and_dnsmasq_query_log():
     assert view["exit_addrs"] == {"10.64.0.2": 3, "fd00:64::2": 3}
     assert [str(n) for n in view["pipe_nets"]] == ["192.168.10.0/24"]
     assert "log-queries=extra" in render(cfg(), log_queries=True) and "log-queries" not in render(cfg())
+
+
+def _dns_reply(qid: int, name: str, answers: list[tuple[int, bytes]]) -> bytes:
+    import struct
+
+    from vpn_egress.router.lookup import _qname
+
+    msg = struct.pack("!HHHHHH", qid, 0x8180, 1, len(answers), 0, 0) + _qname(name) + struct.pack("!HH", 1, 1)
+    for rtype, rdata in answers:
+        msg += b"\xc0\x0c" + struct.pack("!HHIH", rtype, 1, 60, len(rdata)) + rdata  # name: pointer to the question
+    return msg
+
+
+def test_lookup_dns_parsing_and_resolve():
+    import ipaddress
+    import socket
+    import struct
+    import threading
+
+    from vpn_egress.router.lookup import parse_answers, resolve
+
+    cname = b"\x04edge\x07example\x03net\x00"
+    msg = _dns_reply(7, "www.example.com", [(5, cname), (1, ipaddress.IPv4Address("198.51.100.7").packed)])
+    assert parse_answers(msg, 7) == ["198.51.100.7"]
+    assert parse_answers(msg, 8) == []  # someone else's answer
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    srv.bind(("127.0.0.1", 0))
+
+    def serve():
+        for _ in range(2):
+            data, addr = srv.recvfrom(512)
+            qid, qtype = struct.unpack("!H", data[:2])[0], struct.unpack("!H", data[-4:-2])[0]
+            rec = (1, bytes([192, 0, 2, 1])) if qtype == 1 else (28, ipaddress.IPv6Address("2001:db8::1").packed)
+            srv.sendto(_dns_reply(qid, "example.com", [rec]), addr)
+
+    threading.Thread(target=serve, daemon=True).start()
+    found = resolve("example.com", "127.0.0.1", timeout=2, port=srv.getsockname()[1])
+    srv.close()
+    assert found == ["192.0.2.1", "2001:db8::1"]
+
+
+def test_lookup_routing_reasons_and_route():
+    import ipaddress
+
+    from vpn_egress.router.lookup import routing
+    from vpn_egress.router.sources import Entries
+
+    raw = state()
+    raw["lists"] = [
+        {"id": 1, "name": "a", "exit": 3, "entries": ["198.51.100.0/24", "AS64500"]},
+        {"id": 2, "name": "b", "exit": "direct", "entries": ["JP"]},
+    ]
+    st = apply.validate(raw)
+
+    class Cache:
+        def load(self, src):
+            return {
+                "AS64500": Entries({"198.51.100.0/25"}, set(), set()),
+                "JP": Entries({"203.0.113.0/24"}, set(), set()),
+            }.get(src.name)
+
+    learned = {(2, "198.51.100.7")}
+
+    def is_learned(list_id, ip):
+        return (list_id, str(ip)) in learned
+
+    r = routing(ipaddress.ip_address("198.51.100.7"), st, Cache(), is_learned)
+    assert r["matches"] == [
+        {"list": 1, "reasons": [{"kind": "range"}, {"kind": "asn", "name": "AS64500"}]},
+        {"list": 2, "reasons": [{"kind": "learned"}]},
+    ]
+    assert r["route"] == 1  # the first match wins
+    assert routing(ipaddress.ip_address("203.0.113.9"), st, Cache(), is_learned)["route"] == 2
+    assert routing(ipaddress.ip_address("192.0.2.1"), st, Cache(), is_learned)["route"] == "default"
+    assert routing(ipaddress.ip_address("192.168.1.1"), st, Cache(), is_learned)["route"] == "local"
+
+
+def test_lookup_server_answers_over_the_socket(tmp_path, monkeypatch):
+    import socket
+
+    from vpn_egress.router import lookup
+
+    monkeypatch.setattr(lookup, "learned", lambda list_id, ip: False)
+
+    class Dbs:
+        def get(self, name, ip):
+            return (
+                ({"country": {"iso_code": "CLOUDFLARE"}}, 24)
+                if name == "country"
+                else (
+                    {"autonomous_system_number": 13335, "autonomous_system_organization": "Cloudflare, Inc."},
+                    20,
+                )
+            )
+
+        def info(self):
+            return {"country": 1, "asn": 1}
+
+    c = cfg(EGRESS_STATE_DIR=str(tmp_path))
+    server = lookup.serve(lookup.Lookup(c, None, Dbs()), tmp_path / "lookup.sock", os.getuid())
+    try:
+
+        def ask(q):
+            with socket.socket(socket.AF_UNIX) as s:
+                s.connect(str(tmp_path / "lookup.sock"))
+                s.sendall(json.dumps({"q": q}).encode() + b"\n")
+                return json.loads(s.makefile().readline())
+
+        r = ask("198.51.100.7")
+        a = r["addresses"][0]
+        assert (a["geoip"], a["route"]) == ({"code": "CLOUDFLARE", "prefix": "198.51.100.0/24"}, "default")
+        assert a["asn"] == {"number": 13335, "org": "Cloudflare, Inc.", "prefix": "198.51.96.0/20"}
+        assert ask("not a name!")["error"] == "not an address or a domain name"
+        assert oct((tmp_path / "lookup.sock").stat().st_mode)[-3:] == "600"
+    finally:
+        server.shutdown()

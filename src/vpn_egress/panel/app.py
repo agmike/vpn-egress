@@ -674,6 +674,21 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         live_mod.touch_watch(settings.state_dir)
         return JSONResponse(live_mod.labelled(settings.state_dir, load_state()), headers={"Cache-Control": "no-store"})
 
+    @app.get("/live/lookup")
+    async def live_lookup(request: Request, q: str = ""):
+        if current_user(request) is None:
+            return JSONResponse({"error": "signed out"}, status_code=401)
+        q = q.strip()[:253]
+        if not q:
+            return JSONResponse({"error": "enter an address or a domain"}, status_code=400)
+        try:
+            result = await asyncio.to_thread(live_mod.ask_router, settings.state_dir, q)
+        except (OSError, ValueError):
+            return JSONResponse(
+                {"error": "the router doesn't answer lookups (live log off, or restarting)"}, status_code=503
+            )
+        return JSONResponse(live_mod.label_lookup(result, load_state()), headers={"Cache-Control": "no-store"})
+
     async def live_form(request: Request):
         user = current_user(request)
         if user is None:

@@ -35,6 +35,20 @@ def _size(value: str) -> int:
     return int(float(m.group(1)) * 1000 ** " KMGT".index(m.group(2) or " "))
 
 
+COUNTRY_DB_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country.mmdb"
+ASN_DB_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
+
+
+def _db_url(env: dict, name: str, default: str) -> str:
+    """A lookup database URL; set to "" (or "off") to go without it."""
+    value = env.get(name, default).strip()
+    if value.lower() in ("", "off", "none"):
+        return ""
+    if not value.startswith("https://"):
+        raise ConfigError(f"{name} must be an https:// URL")
+    return value
+
+
 def _bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
@@ -64,6 +78,8 @@ class Config:
     traffic_iface: str = ""
     traffic_allowance: int = 0
     live_log: bool = True
+    country_db_url: str = ""
+    asn_db_url: str = ""
 
     @property
     def run_dir(self) -> Path:
@@ -125,6 +141,8 @@ class Config:
                 pipe_client_mtu=int(get("EGRESS_PIPE_CLIENT_MTU", "1280")),
                 traffic_iface=traffic_iface,
                 live_log=_bool(get("EGRESS_LIVE_LOG", "true")),
+                country_db_url=_db_url(env, "EGRESS_COUNTRY_DB_URL", COUNTRY_DB_URL),
+                asn_db_url=_db_url(env, "EGRESS_ASN_DB_URL", ASN_DB_URL),
                 traffic_allowance=_size(allowance) if allowance else 0,
             )
         except ValueError as exc:

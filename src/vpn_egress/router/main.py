@@ -7,10 +7,11 @@ from __future__ import annotations
 import json
 import signal
 import sys
+import threading
 import time
 import traceback
 
-from . import blocklists, firewall, live, traffic
+from . import blocklists, firewall, live, lookup, traffic
 from . import pipe as pipe_mod
 from .apply import StateError, apply, required_sources, validate
 from .config import Config, ConfigError
@@ -62,6 +63,24 @@ def main() -> int:
 
     dns.prepare()
     cache = SourceCache(cfg.data_dir / "sources", cfg.geoip_url, cfg.asn_url)
+
+    dbs = lookup.Databases(cfg.data_dir / "lookup", {"country": cfg.country_db_url, "asn": cfg.asn_db_url})
+    lookup_server = None
+    if live_log:
+        try:
+            lookup_server = lookup.serve(
+                lookup.Lookup(cfg, cache, dbs, live_log), cfg.state_dir / "lookup.sock", cfg.state_uid
+            )
+        except OSError as exc:
+            log(f"lookup: {exc}")
+
+    def refresh_dbs(max_age: float) -> None:
+        def work() -> None:
+            for err in dbs.refresh(max_age):
+                log(f"lookup: {err}")
+
+        if live_log:  # in the background: large downloads must not hold up routing
+            threading.Thread(target=work, daemon=True).start()
 
     def refresh_sources(max_age: float) -> None:
         """Download GeoIP/ASN/URL sources the lists use (missing ones only
@@ -116,6 +135,7 @@ def main() -> int:
             log(f"blocklists failed:\n{traceback.format_exc()}")
 
     # Sets must exist before dnsmasq starts filling them.
+    refresh_dbs(max_age=cfg.source_interval)
     refresh_sources(max_age=cfg.source_interval)
     do_apply("start")
     dns.start()
@@ -166,6 +186,7 @@ def main() -> int:
             do_blocklists(quick=False)
             last_full = now
         if now - last_sources >= cfg.source_interval:
+            refresh_dbs(max_age=cfg.source_interval)
             refresh_sources(max_age=cfg.source_interval)
             do_apply("sources refreshed")
             last_sources = last_apply = now
@@ -173,6 +194,9 @@ def main() -> int:
     log("stopping")
     if conntrack:
         conntrack.stop()
+    if lookup_server:
+        lookup_server.shutdown()
+        (cfg.state_dir / "lookup.sock").unlink(missing_ok=True)
     if publisher:
         (cfg.state_dir / "live.json").unlink(missing_ok=True)
     do_traffic()
