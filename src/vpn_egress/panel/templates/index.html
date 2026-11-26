@@ -65,10 +65,9 @@
     <p class="muted">Anything not on a list leaves from this server's own IP.</p>
     {% if status.exits %}
     <div class="scroll"><table>
-      <tr><th>#</th><th>Name</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th></tr>
+      <tr><th>Name</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th></tr>
       {% for e in status.exits %}
       <tr>
-        <td class="num">{{ e.id }}</td>
         <td class="nowrap">{{ e.name }}</td>
         <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif e.up %}<span class="ok">up</span>{% else %}<span class="bad">down</span>{% endif %}</td>
         <td>{{ e.handshake_age | age }}</td>

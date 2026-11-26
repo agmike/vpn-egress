@@ -80,6 +80,32 @@
   .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
   .scroll { overflow-x: auto; }
+  /* Phones: each table row becomes a card of "label  value" lines (labels
+     come from the header row, see labelTables below). */
+  @media (max-width: 640px) {
+    .scroll { overflow-x: visible; }
+    .scroll table, .scroll tbody, .scroll tr, .scroll td { display: block; width: auto; }
+    .scroll tr.head { display: none; }
+    .scroll tr { border-top: 1px solid var(--line); padding: 8px 0; }
+    .scroll tr.head + tr { border-top: none; }
+    .scroll tr.subrow { border-top: none; padding-top: 0; }
+    .scroll td { border: none; padding: 3px 0; display: flex; gap: 16px; justify-content: space-between;
+                 align-items: center; text-align: right; white-space: normal; overflow-wrap: anywhere; }
+    .scroll td[data-label]::before { content: attr(data-label); color: var(--muted); text-align: left;
+                 flex: none; white-space: nowrap; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .scroll td.card-title { font-weight: 600; justify-content: flex-start; text-align: left; }
+    .scroll td.card-title::before { content: none; }
+    .scroll td:not([data-label]) { justify-content: flex-start; text-align: left; }
+    .scroll td.actions { white-space: normal; flex-wrap: wrap; }
+    .scroll td input[type=text], .scroll td input[type=url] { flex: 1; min-width: 0; }
+    .cardhead { flex-direction: column; align-items: stretch; gap: 4px; }
+    .cardhead .actions { margin-left: -6px; }
+    /* Two-column key/value and help tables: the key above its value. */
+    table.format, table.format tbody, table.format tr, table.format td { display: block; }
+    table.format tr { padding: 4px 0; }
+    table.format td { padding: 0; overflow-wrap: anywhere; }
+    table.format td:first-child { font-size: 13px; }
+  }
   button, a.button { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
            border: 1px solid var(--line); background: var(--card); color: var(--text); text-decoration: none; }
   a { color: var(--accent); }
@@ -90,6 +116,28 @@
 <body>
 {% block body %}{% endblock %}
 <script>
+// Card layout on phones: give each cell its column's header as data-label.
+function labelTables() {
+  document.querySelectorAll(".scroll table").forEach(function (table) {
+    const head = Array.from(table.rows).find(function (r) { return r.querySelector("th"); });
+    if (!head) return;
+    head.classList.add("head");
+    const labels = Array.from(head.cells).map(function (c) { return c.textContent.trim(); });
+    Array.from(table.rows).forEach(function (row) {
+      if (row === head || row.cells.length === 1) return;  // subrows span the table
+      Array.from(row.cells).forEach(function (cell, i) {
+        if (labels[i]) cell.dataset.label = labels[i];
+      });
+      const first = row.cells[0];
+      if (first && !first.querySelector("input, select, textarea")) first.classList.add("card-title");
+    });
+  });
+}
+labelTables();
+document.querySelectorAll(".scroll table").forEach(function (t) {
+  new MutationObserver(labelTables).observe(t, { childList: true, subtree: true });
+});
+
 // [data-open="#id"] shows a hidden editor and hides itself; [data-cancel]
 // resets the form, hides the editor and brings the opener back.
 document.addEventListener("click", function (ev) {
