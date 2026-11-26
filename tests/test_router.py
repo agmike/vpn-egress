@@ -608,3 +608,23 @@ def test_lookup_server_answers_over_the_socket(tmp_path, monkeypatch):
         assert oct((tmp_path / "lookup.sock").stat().st_mode)[-3:] == "600"
     finally:
         server.shutdown()
+
+
+def test_router_health(tmp_path):
+    import time
+
+    from vpn_egress.router.main import health
+
+    c = cfg(EGRESS_STATE_DIR=str(tmp_path))
+    proc = tmp_path / "proc"
+    (proc / "12").mkdir(parents=True)
+    (proc / "12" / "comm").write_text("python\n")
+    assert health(c, proc) == "no status written yet"
+    (tmp_path / "status.json").write_text("{}")
+    assert health(c, proc) == "dnsmasq is not running"
+    (proc / "34").mkdir()
+    (proc / "34" / "comm").write_text("dnsmasq\n")
+    assert health(c, proc) is None
+    old = time.time() - 600
+    os.utime(tmp_path / "status.json", (old, old))
+    assert "apply loop is stuck" in health(c, proc)

@@ -48,6 +48,8 @@ RUN apt-get update \
 COPY --from=awg /awg /usr/local/bin/awg
 COPY --from=build-router /venv /venv
 ENV PATH=/venv/bin:$PATH PYTHONUNBUFFERED=1 VPN_EGRESS_VERSION=${VERSION}
+# Unhealthy when the apply loop stops writing status or dnsmasq is gone.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=3 CMD ["vpn-egress-router", "--health"]
 CMD ["vpn-egress-router"]
 
 FROM ${PYTHON_IMAGE} AS panel

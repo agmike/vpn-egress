@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 from . import blocklists, firewall, live, lookup, traffic
 from . import pipe as pipe_mod
@@ -32,12 +33,33 @@ def log(msg: str) -> None:
     print(f"vpn-egress-router: {msg}", flush=True)
 
 
+def health(cfg: Config, proc: Path = Path("/proc")) -> str | None:
+    """For the container's HEALTHCHECK: None when healthy, else why not."""
+    try:
+        age = time.time() - (cfg.state_dir / "status.json").stat().st_mtime
+    except FileNotFoundError:
+        return "no status written yet"
+    if age > 3 * cfg.apply_interval + 30:
+        return f"status is {int(age)} s old: the apply loop is stuck"
+    for comm in proc.glob("[0-9]*/comm"):
+        try:
+            if comm.read_text().strip() == "dnsmasq":
+                return None
+        except OSError:
+            continue
+    return "dnsmasq is not running"
+
+
 def main() -> int:
     try:
         cfg = Config.from_env()
     except ConfigError as exc:
         log(f"config error: {exc}")
         return 2
+    if sys.argv[1:] == ["--health"]:
+        problem = health(cfg)
+        print(problem or "ok")
+        return 1 if problem else 0
     cfg.data_dir.mkdir(parents=True, exist_ok=True)
     state_file = cfg.state_dir / "state.json"
 
