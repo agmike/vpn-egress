@@ -82,7 +82,13 @@
   .scroll { overflow-x: auto; }
   .tabs { display: flex; gap: 0; } .tabs button { border-radius: 0; } .tabs button:first-child { border-radius: 6px 0 0 6px; }
   .tabs button:last-child { border-radius: 0 6px 6px 0; }
-  label.check { flex-direction: row !important; align-items: center; gap: 6px !important; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .toolbar button, .toolbar input[type=text], .toolbar select { height: 34px; box-sizing: border-box; margin: 0;
+           font-size: 14px; line-height: 1; }
+  .toolbar input[type=text] { width: 240px; }
+  .toolbar [hidden] { display: none; }
+  .toolbar label.check { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 4px; font-size: 14px;
+           color: var(--muted); cursor: pointer; }
   .action { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 4px 12px;
             margin: 8px 0; position: sticky; top: 8px; background: var(--card); z-index: 5; }
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px;
@@ -99,6 +105,7 @@
     header h1 { flex-basis: 100%; margin-bottom: 4px; }
     header .who { position: absolute; top: 8px; right: 16px; }
     header .who span { display: none; }
+    .toolbar input[type=text] { flex: 1 1 100%; width: auto; }
     .scroll { overflow-x: visible; }
     .scroll table, .scroll tbody, .scroll tr, .scroll td { display: block; width: auto; }
     .scroll tr.head { display: none; }

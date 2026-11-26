@@ -78,7 +78,7 @@ class LiveLog:
         with self.lock:
             if verb.startswith("query["):
                 rec = {
-                    "t": round(time.time(), 1),
+                    "t": round(time.time(), 3),
                     "client": client,
                     "type": verb[6:-1],
                     "name": name,
@@ -152,7 +152,7 @@ class LiveLog:
         with self.lock:
             self.conns.append(
                 {
-                    "t": round(float(stamp.group(1)), 1) if stamp else round(time.time(), 1),
+                    "t": round(float(stamp.group(1)), 3) if stamp else round(time.time(), 3),
                     "proto": proto,
                     "client": src,
                     "dst": dst,

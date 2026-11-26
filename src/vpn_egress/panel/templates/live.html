@@ -9,14 +9,14 @@
     <h2>Live</h2>
     <p class="muted">Recent DNS queries and new connections from pipe clients, newest first; kept in the router's
       memory only, and handed to this page only while it's open.</p>
-    <div class="inline-fields">
+    <div class="toolbar">
       <div class="tabs">
         <button type="button" data-tab="dns" class="primary">DNS</button>
         <button type="button" data-tab="conns">Connections</button>
       </div>
-      <label>Filter <input type="text" id="filter" placeholder="name, address, list…" style="width: 200px"></label>
-      <label>Client <select id="client"><option value="">all</option></select></label>
-      <label class="check" id="blocked-wrap"><input type="checkbox" id="blocked"> blocked only</label>
+      <input type="text" id="filter" placeholder="Filter: name, address, list…" aria-label="Filter">
+      <select id="client" aria-label="Client"><option value="">All clients</option></select>
+      <label class="check" id="blocked-wrap"><input type="checkbox" id="blocked"> Blocked only</label>
       <button type="button" id="pause">Pause</button>
     </div>
     <p class="muted" id="state">Loading…</p>
@@ -38,7 +38,7 @@
 <script>
 (function () {
   const csrf = {{ csrf | tojson }};
-  let tab = "dns", paused = false, data = null, timer = null;
+  let tab = "dns", paused = false, data = null, timer = null, shown = null, held = false;
   const $ = function (id) { return document.getElementById(id); };
   const HEAD = {
     dns: ["Time", "Client", "Name", "Result", "Route", ""],
@@ -51,7 +51,21 @@
     if (cls) e.className = cls;
     return e;
   }
-  function time(t) { return new Date(t * 1000).toLocaleTimeString([], { hour12: false }); }
+  function pad(n, w) { return String(n).padStart(w, "0"); }
+  function time(t) {
+    const d = new Date(t * 1000);
+    return pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) + ":" + pad(d.getSeconds(), 2) + "." + pad(d.getMilliseconds(), 3);
+  }
+  function whois(ip) {
+    const a = el("a", ip, "mono");
+    a.href = "https://bgp.he.net/ip/" + encodeURIComponent(ip);
+    a.target = "_blank"; a.rel = "noreferrer noopener"; a.title = "whois: network and owner (bgp.he.net)";
+    return a;
+  }
+  function selecting() {
+    const s = window.getSelection();
+    return s && !s.isCollapsed && $("table").contains(s.anchorNode);
+  }
   function who(r) { return r.client_name ? r.client_name : r.client; }
 
   function note(text, bad) {
@@ -98,12 +112,23 @@
     return hay.indexOf(text) !== -1;
   }
 
+  function status(rows) {
+    $("state").textContent = (paused ? "Paused · " : held ? "Holding while text is selected · " : "") + rows.length +
+      " shown" + (data.updated ? " · router updated " + Math.max(0, data.now - data.updated) + " s ago" : "");
+  }
+
   function render() {
     if (!data) return;
     const table = $("table"), text = $("filter").value.trim().toLowerCase(), client = $("client").value;
     const rows = (tab === "dns" ? data.dns : data.conns).filter(function (r) {
       return matches(r, text) && (!client || who(r) === client) && (tab !== "dns" || !$("blocked").checked || r.result === "blocked");
     });
+    // Redrawing replaces the rows, which loses a text selection: hold while
+    // there is one, and don't redraw what hasn't changed.
+    held = selecting();
+    const sig = tab + JSON.stringify(rows.slice(0, 300));
+    if (held || sig === shown) { status(rows); return; }
+    shown = sig;
     const frag = document.createDocumentFragment();
     const head = el("tr");
     HEAD[tab].forEach(function (h) { head.appendChild(el("th", h)); });
@@ -134,7 +159,8 @@
         }
       } else {
         const d = el("td", null), dw = el("span");
-        dw.appendChild(el("span", r.name || r.dst, "mono"));
+        // whois only for addresses on the internet: a peer's address is private.
+        dw.appendChild(r.name || r.via === "pipe" ? el("span", r.name || r.dst, "mono") : whois(r.dst));
         dw.appendChild(el("span", (r.port ? " :" + r.port : "") + " " + r.proto, "muted"));
         d.appendChild(dw);
         d.title = r.dst + (r.port ? ":" + r.port : "");
@@ -153,8 +179,7 @@
       td.colSpan = 6; tr.appendChild(td); frag.appendChild(tr);
     }
     table.replaceChildren(frag);
-    $("state").textContent = (paused ? "Paused · " : "") + rows.length + " shown" +
-      (data.updated ? " · router updated " + Math.max(0, data.now - data.updated) + " s ago" : "");
+    status(rows);
   }
 
   function clients() {
@@ -185,6 +210,7 @@
     });
   });
   ["filter", "client", "blocked"].forEach(function (id) { $(id).addEventListener("input", render); });
+  document.addEventListener("selectionchange", function () { if (held && !selecting()) render(); });
   $("pause").addEventListener("click", function () {
     paused = !paused; $("pause").textContent = paused ? "Resume" : "Pause";
     if (paused) render(); else poll();
