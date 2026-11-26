@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Restore · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <section>
+    <h2>Restore a backup</h2>
+    {% if errors %}
+    <div class="notice bad">This backup can't be restored here:<ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>
+    {% else %}
+    <p>The backup from <b>{{ created or "an unknown date" }}</b> replaces <b>all</b> current settings.
+      The current ones are kept, so the restore can be undone from the Status page.</p>
+    {% endif %}
+    <div class="scroll"><table>
+      <tr><th></th><th>Now</th><th>In the backup</th></tr>
+      {% macro names(xs) %}{{ xs | join(", ") if xs else "none" }}{% endmacro %}
+      {% macro row(label, now, then) %}<tr><td>{{ label }}</td><td>{{ now }}</td><td class="{{ 'warn' if now != then }}">{{ then }}</td></tr>{% endmacro %}
+      {{ row("Exits", names(current.exits), names(incoming.exits)) }}
+      {{ row("Routing lists", names(current.lists), names(incoming.lists)) }}
+      {{ row("Everything else", current.default, incoming.default) }}
+      {{ row("Pipe key", "set" if current.pipe else "none", "set" if incoming.pipe else "none") }}
+      {{ row("Peers", names(current.peers), names(incoming.peers)) }}
+      {% macro dns(s) %}{% if s.blocklists is none %}defaults{% else %}{{ s.blocklists }} blocklist{{ "s" if s.blocklists != 1 }}, {{ s.dns_rules }} rule{{ "s" if s.dns_rules != 1 }}{% endif %}{% endmacro %}
+      {{ row("DNS", dns(current), dns(incoming)) }}
+      {% macro allowance(a) %}{{ "router default" if a == "default" else (a | size) if a else "off" }}{% endmacro %}
+      {{ row("Traffic allowance", allowance(current.allowance), allowance(incoming.allowance)) }}
+      <tr><td colspan="3" class="muted">Changed values are highlighted. The pipe key itself isn't compared.</td></tr>
+    </table></div>
+    {% if not errors and incoming.pipe and current.pipe %}
+    <p class="muted">The pipe gets the backup's key and peers: devices set up since the backup stop connecting.</p>
+    {% endif %}
+    <div class="actions">
+      {% if not errors %}
+      <form method="post" action="/backup/restore"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="primary">Restore</button></form>
+      {% endif %}
+      <form method="post" action="/backup/cancel"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit">Cancel</button></form>
+    </div>
+  </section>
+</main>
+{% endblock %}

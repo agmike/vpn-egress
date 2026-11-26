@@ -697,3 +697,75 @@ def test_pages_wait_for_the_router(tmp_path, monkeypatch):
 def test_applied_needs_sign_in(tmp_path):
     client = make_client(tmp_path, {"sub": "1", "groups": ["admins"]})
     assert client.get("/applied").status_code == 401
+
+
+def test_backup_file_roundtrip_and_errors():
+    import pytest
+
+    from vpn_egress.panel import backup
+
+    state = {"exits": [{"id": 1, "name": "nl", "wireguard": {"private_key": PRIV}}], "dns": {"lists": []}}
+    plain = backup.export(state)
+    assert backup.read(plain)[0] == state and not backup.is_encrypted(plain)
+    enc = backup.export(state, "correct horse")
+    assert PRIV.encode() not in enc and backup.is_encrypted(enc)
+    assert backup.read(enc, "correct horse")[0] == state
+    for data, passphrase, message in (
+        (enc, "", "enter its passphrase"),
+        (enc, "wrong", "Wrong passphrase"),
+        (enc.replace(b'"format"', b'"fmt"'), "correct horse", "Not a vpn-egress backup"),
+        (b"\x89PNG", "", "not JSON"),
+        (plain.replace(b'"version": 1', b'"version": 9'), "", "version 9"),
+    ):
+        with pytest.raises(backup.BackupError, match=message):
+            backup.read(data, passphrase)
+
+
+def test_backup_download_restore_and_undo(tmp_path):
+    client, token = pipe_ready(tmp_path)
+    client.post("/pipe/peers", data={"csrf": token, "name": "Phone"})
+    add_exit(client, "nl")
+    page = client.get("/").text
+    assert "Download a backup" in page and "Undo the restore" not in page
+    r = client.post("/backup/export", data={"csrf": token, "passphrase": "pw", "passphrase2": "pw"})
+    assert r.headers["content-disposition"].startswith('attachment; filename="vpn-egress-backup-')
+    assert r.headers["cache-control"] == "no-store" and PRIV.encode() not in r.content
+    saved, file = state_of(tmp_path), r.content
+    r = client.post("/backup/export", data={"csrf": token, "passphrase": "pw", "passphrase2": "px"})
+    assert "passphrases don&#39;t match" in r.text
+
+    # Change things, then restore: the preview first, nothing replaced yet.
+    client.post("/exits/1/delete", data={"csrf": token})
+    client.post("/pipe/peers", data={"csrf": token, "name": "Laptop"})
+    up = {"file": ("b.json", file, "application/json")}
+    r = client.post("/backup/upload", data={"csrf": token, "passphrase": "bad"}, files=up)
+    assert "Wrong passphrase" in r.text
+    r = client.post("/backup/upload", data={"csrf": token, "passphrase": "pw"}, files=up)
+    assert r.status_code == 200 and "Phone, Laptop" in r.text and ">Restore</button>" in r.text
+    assert state_of(tmp_path)["exits"] == []
+    r = client.post("/backup/restore", data={"csrf": token})
+    assert "Restored the backup from" in r.text and "Undo the restore" in r.text
+    assert state_of(tmp_path) == saved
+    assert not (tmp_path / ".pending-restore.json").exists()
+    assert oct((tmp_path / "snapshots").stat().st_mode)[-3:] == "700"
+    r = client.post("/backup/restore", data={"csrf": token})  # used up
+    assert "Nothing to restore" in r.text
+    r = client.post("/backup/undo", data={"csrf": token})
+    assert "Put back the settings" in r.text and state_of(tmp_path)["exits"] == []
+    assert [p["name"] for p in state_of(tmp_path)["pipe"]["peers"]] == ["Phone", "Laptop"]
+    assert "nothing to undo" in client.post("/backup/undo", data={"csrf": token}).text
+
+
+def test_backup_that_does_not_fit_is_refused(tmp_path):
+    from vpn_egress.panel import backup
+
+    client, token = pipe_ready(tmp_path)
+    client.post("/pipe/peers", data={"csrf": token, "name": "Phone"})
+    state = state_of(tmp_path)
+    state["pipe"]["peers"][0]["address"] = "10.99.0.2/32"  # another server's subnet
+    up = {"file": ("b.json", backup.export(state), "application/json")}
+    r = client.post("/backup/upload", data={"csrf": token}, files=up)
+    assert r.status_code == 400 and "fit this server&#39;s pipe subnets" in r.text and ">Restore</button>" not in r.text
+    assert "Nothing to restore" in client.post("/backup/restore", data={"csrf": token}).text
+    r = client.post("/backup/upload", data={"csrf": token}, files={"file": ("b.json", b"{}", "application/json")})
+    assert "Not a vpn-egress backup" in r.text

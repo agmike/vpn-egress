@@ -36,6 +36,10 @@ picked per domain or IP list in a small web panel.
 - **Transfer meter:** bytes sent and received on the uplink per calendar month (UTC), kept
   across restarts and reboots, with an optional allowance (OCI's free tier: 10 TB outbound),
   set or turned off on the Status page, a month-end projection and a warning at 80%.
+- **Backup:** one file with everything set in the panel (exits and keys, pipe key and peers,
+  routing, DNS, allowance), encrypted with a passphrase (scrypt, AES-256-GCM) or plain. A
+  restore shows what it would change, is checked with the router's own rules first, and can be
+  undone (the last 5 states before a restore are kept in `snapshots/`).
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
 ## How it runs

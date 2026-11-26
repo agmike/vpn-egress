@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
+from . import backup
 from .state import (
     LABEL_RE,
     allocate_addresses,
@@ -350,6 +351,9 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "status": status,
                 "state": state,
                 "traffic": traffic,
+                "snapshot": (lambda snaps: backup.snapshot_time(snaps[-1]) if snaps else None)(
+                    backup.snapshots(settings.state_dir)
+                ),
                 "allowance_text": size_text(traffic.get("allowance")) if traffic else "",
                 "warnings": warnings(raw_state, traffic),
                 "flash": request.session.pop("flash", None),
@@ -551,6 +555,97 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         else:
             save_section(settings.state_dir, "traffic", {"allowance": allowance})
             flash(request, f"Allowance set to {human_size(allowance)}." if allowance else "Allowance turned off.")
+        return RedirectResponse("/", status_code=303)
+
+    # --- backup ----------------------------------------------------------------------
+
+    @app.post("/backup/export")
+    async def backup_export(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        passphrase = form.get("passphrase") or ""
+        if passphrase != (form.get("passphrase2") or ""):
+            flash(request, "Backup: the passphrases don't match.", bad=True)
+            return RedirectResponse("/#backup", status_code=303)
+        data = backup.export(load_state(), passphrase)
+        name = f"vpn-egress-backup-{today().isoformat()}.json"
+        return Response(
+            data,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
+        )
+
+    def backup_preview(request: Request, user: dict, state: dict, created: str, errors: list[str]):
+        return TEMPLATES.TemplateResponse(
+            request,
+            "backup_preview.html",
+            {
+                "user": user,
+                "page": "status",
+                "csrf": csrf_token(request),
+                "created": created,
+                "errors": errors,
+                "current": backup.summary(load_state()),
+                "incoming": backup.summary(state),
+            },
+            status_code=400 if errors else 200,
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/backup/upload", response_class=HTMLResponse)
+    async def backup_upload(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        upload = form.get("file")
+        raw = await upload.read(backup.MAX_SIZE + 1) if hasattr(upload, "read") else b""
+        try:
+            if not raw:
+                raise backup.BackupError("Choose a backup file")
+            state, created = backup.read(raw, form.get("passphrase") or "")
+        except backup.BackupError as exc:
+            flash(request, f"Backup not read: {exc}.", bad=True)
+            return RedirectResponse("/#backup", status_code=303)
+        errors = backup.check(state, pipe_status().get("addresses"))
+        if errors:
+            backup.drop_pending(settings.state_dir)
+            return backup_preview(request, user, state, created, errors)
+        request.session["restore"] = backup.save_pending(settings.state_dir, state, created)
+        return backup_preview(request, user, state, created, [])
+
+    @app.post("/backup/restore")
+    async def backup_restore(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        pending = backup.take_pending(settings.state_dir, request.session.pop("restore", ""))
+        if pending is None:
+            flash(request, "Nothing to restore (the upload expired after 15 minutes); upload it again.", bad=True)
+        else:
+            backup.restore(settings.state_dir, pending[0])
+            flash(request, f"Restored the backup from {pending[1] or 'an unknown date'}.")
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/backup/cancel")
+    async def backup_cancel(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        request.session.pop("restore", None)
+        backup.drop_pending(settings.state_dir)
+        return RedirectResponse("/#backup", status_code=303)
+
+    @app.post("/backup/undo")
+    async def backup_undo(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        when = backup.undo(settings.state_dir)
+        if when:
+            flash(request, f"Put back the settings as they were before the restore ({when}).")
+        else:
+            flash(request, "There is nothing to undo.", bad=True)
         return RedirectResponse("/", status_code=303)
 
     @app.post("/exits/{exit_id}/edit", response_class=HTMLResponse)

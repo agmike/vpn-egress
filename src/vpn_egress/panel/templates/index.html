@@ -103,9 +103,46 @@
   </section>
   {% endif %}
 
+  <section id="backup">
+    <h2>Backup</h2>
+    <p class="muted">One file with everything set here: exits and their keys, the pipe's key and peers, routing, DNS and the
+      allowance. Not in it: the traffic counts, and settings that come from the router's environment (pipe port,
+      addresses, endpoint). Peers keep their configs after a restore.</p>
+    <details><summary>Download a backup</summary>
+      <form method="post" action="/backup/export" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" style="width: 200px"></label>
+        <label>Again <input type="password" name="passphrase2" autocomplete="new-password" style="width: 200px"></label>
+        <button type="submit">Download</button>
+      </form>
+      <p class="muted">With a passphrase the file is encrypted (AES-256-GCM, scrypt); without one it holds the private keys
+        in plain text. There is no way to recover a forgotten passphrase.</p>
+    </details>
+    <details><summary>Restore from a backup</summary>
+      <form method="post" action="/backup/upload" enctype="multipart/form-data" class="inline-fields">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Backup file <input type="file" name="file" accept=".json,application/json"></label>
+        <label>Passphrase <input type="password" name="passphrase" autocomplete="off" style="width: 200px"></label>
+        <button type="submit">Upload</button>
+      </form>
+      <p class="muted">Nothing changes yet: the next page shows what the backup holds and asks before replacing everything.</p>
+    </details>
+    {% if snapshot %}
+    <form method="post" action="/backup/undo" data-confirm="Put back the settings from before the last restore?">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <p class="muted">Settings before the last restore are kept ({{ snapshot }}).
+        <button type="submit" class="link">Undo the restore</button></p>
+    </form>
+    {% endif %}
+  </section>
+
   <p class="muted">
     Status {{ status_age | age if status_age is not none else "missing" }}
     · build <span class="mono">{{ build_sha }}</span>
   </p>
 </main>
+<script>
+document.querySelectorAll("form[data-confirm]").forEach(function (f) {
+  f.addEventListener("submit", function (ev) { if (!confirm(f.dataset.confirm)) ev.preventDefault(); });
+});
+</script>
 {% endblock %}
