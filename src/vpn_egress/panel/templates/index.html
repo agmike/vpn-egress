@@ -2,6 +2,7 @@
 {% block body %}
 {% include "_header.html" %}
 <main>
+  {% if flash %}<div class="notice {{ 'bad' if flash.bad }}">{{ flash.text }}</div>{% endif %}
   {% for w in warnings %}<div class="notice {{ w.level }}">{{ w.text }}</div>{% endfor %}
 
   {% if traffic %}
@@ -12,7 +13,7 @@
     <p><strong>{{ traffic.tx | size }}</strong> sent of {{ traffic.allowance | size }} <span class="muted">({{ "%.1f" | format(pct) }}%)</span></p>
     <div class="meter"><span class="{{ 'bad' if pct >= 100 else 'warn' if pct >= 80 or (traffic.projected_tx and traffic.projected_tx > traffic.allowance) }}" style="width: {{ [pct, 100] | min }}%"></span></div>
     {% else %}
-    <p><strong>{{ traffic.tx | size }}</strong> sent</p>
+    <p><strong>{{ traffic.tx | size }}</strong> sent <span class="muted">(no allowance)</span></p>
     {% endif %}
     <p class="muted">
       Received {{ traffic.rx | size }} · today {{ traffic.today[0] | size }} sent
@@ -21,6 +22,14 @@
       {% set prev = traffic.months | dictsort | last if traffic.months else none %}
       {% if prev %}· {{ prev[0] }}: {{ prev[1][0] | size }} sent{% endif %}
     </p>
+    <details><summary>Change allowance</summary>
+      <form method="post" action="/traffic" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Monthly outbound allowance <input type="text" name="allowance" value="{{ allowance_text }}" placeholder="e.g. 10TB" style="width: 140px"></label>
+        <button type="submit">Save</button>
+        {% if traffic.allowance %}<button type="submit" name="action" value="off">Turn off</button>{% endif %}
+      </form>
+      <p class="muted">Decimal units (10TB = 10,000 GB), as providers bill. Without an allowance the meter only counts; it never limits traffic.</p>
+    </details>
   </section>
   {% endif %}
 

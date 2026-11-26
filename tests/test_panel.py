@@ -626,3 +626,37 @@ def test_traffic_meter_on_status(tmp_path):
     page = client.get("/").text
     assert "8.5 TB" in page and "of 10.0 TB" in page and "85.0%" in page
     assert "at 85% of the allowance" in page and "2026-10: 3.0 TB" in page
+
+
+def test_traffic_allowance_from_panel(tmp_path):
+    now = int(time.time())
+    (tmp_path / "traffic.json").write_text(
+        json.dumps(
+            {
+                "updated": now,
+                "iface": "eth0",
+                "since": now,
+                "month_start": now,
+                "tx": 6_000_000_000_000,
+                "rx": 0,
+                "allowance": 10_000_000_000_000,
+                "projected_tx": None,
+                "today": [0, 0],
+                "days": {},
+                "months": {},
+            }
+        )
+    )
+    client = signed_in(tmp_path)
+    page = client.get("/").text
+    assert 'value="10TB"' in page and "of 10.0 TB" in page  # the router's default
+    token = csrf_of(page)
+    page = client.post("/traffic", data={"csrf": token, "allowance": "5 tb"}).text
+    assert state_of(tmp_path)["traffic"] == {"allowance": 5_000_000_000_000}
+    assert "Allowance set to 5.0 TB" in page and "over the allowance" in page
+    page = client.post("/traffic", data={"csrf": token, "allowance": "lots"}).text
+    assert "like 10TB" in page and state_of(tmp_path)["traffic"]["allowance"] == 5 * 10**12
+    page = client.post("/traffic", data={"csrf": token, "allowance": "5TB", "action": "off"}).text
+    assert state_of(tmp_path)["traffic"] == {"allowance": None}
+    assert "Allowance turned off" in page and "no allowance" in page
+    assert "over the allowance" not in page and "Turn off" not in page

@@ -32,11 +32,14 @@ from .state import (
     list_from_form,
     next_id,
     parse_expiry,
+    parse_size,
     parse_wg_conf,
     public_key,
     read_json,
     render_client_config,
     save_section,
+    size_text,
+    traffic_allowance,
 )
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -284,6 +287,8 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         raw_state = read_json(settings.state_dir / "state.json") or {}
         state = public_state(raw_state)
         traffic = read_json(settings.state_dir / "traffic.json")
+        if traffic:
+            traffic["allowance"] = traffic_allowance(raw_state, traffic)
         return TEMPLATES.TemplateResponse(
             request,
             "index.html",
@@ -294,7 +299,9 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "status": status,
                 "state": state,
                 "traffic": traffic,
+                "allowance_text": size_text(traffic.get("allowance")) if traffic else "",
                 "warnings": warnings(raw_state, traffic),
+                "flash": request.session.pop("flash", None),
                 "status_age": int(time.time()) - status["updated"] if status and status.get("updated") else None,
                 "build_sha": os.environ.get("BUILD_SHA", "unknown")[:12],
             },
@@ -479,6 +486,21 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         save_section(settings.state_dir, "exits", exits)
         flash(request, f"{e['name']}: new config saved; it reconnects within a minute.")
         return RedirectResponse("/exits", status_code=303)
+
+    @app.post("/traffic")
+    async def traffic_save(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        errors: list[str] = []
+        off = form.get("action") == "off" or not (form.get("allowance") or "").strip()
+        allowance = None if off else parse_size(form.get("allowance", ""), errors)
+        if errors:
+            flash(request, errors[0], bad=True)
+        else:
+            save_section(settings.state_dir, "traffic", {"allowance": allowance})
+            flash(request, f"Allowance set to {human_size(allowance)}." if allowance else "Allowance turned off.")
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/exits/{exit_id}/edit", response_class=HTMLResponse)
     async def exits_edit(request: Request, exit_id: int):

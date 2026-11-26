@@ -35,7 +35,7 @@ picked per domain or IP list in a small web panel.
   firewall must allow forwarding from the pipe to the pipe for that.
 - **Transfer meter:** bytes sent and received on the uplink per calendar month (UTC), kept
   across restarts and reboots, with an optional allowance (OCI's free tier: 10 TB outbound),
-  a month-end projection and a warning at 80%.
+  set or turned off on the Status page, a month-end projection and a warning at 80%.
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
 ## How it runs
@@ -103,7 +103,7 @@ Router:
 | `EGRESS_PIPE_ADDRESSES` | `10.66.0.1/24,fd66::1/64` | server addresses; peers get addresses from these subnets |
 | `EGRESS_PIPE_ENDPOINT` / `EGRESS_PIPE_CLIENT_MTU` | — / `1280` | `host:port` and MTU written into client configs |
 | `EGRESS_TRAFFIC_IFACE` | default route's | interface the transfer meter counts |
-| `EGRESS_TRAFFIC_ALLOWANCE` | — | monthly outbound allowance, e.g. `10TB` (decimal units) |
+| `EGRESS_TRAFFIC_ALLOWANCE` | — | monthly outbound allowance, e.g. `10TB` (decimal units), until one is set in the panel |
 
 Panel: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
 `OIDC_ALLOWED_GROUPS` (comma-separated; the provider must send a `groups` claim),

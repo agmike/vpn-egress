@@ -183,6 +183,40 @@ def parse_wg_conf(text: str) -> tuple[dict | None, list[str]]:
 
 
 EXPIRY_WARN_DAYS = 30
+SIZE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?)B?")
+
+
+def parse_size(text: str, errors: list[str]) -> int | None:
+    """Bytes from "10TB", "500 GB", "1.5T" (decimal units, as providers bill)."""
+    m = SIZE_RE.fullmatch((text or "").strip().upper())
+    if not m:
+        errors.append("Allowance must be a size like 10TB or 500GB")
+        return None
+    n = int(float(m.group(1)) * 1000 ** " KMGT".index(m.group(2) or " "))
+    if not 0 < n <= 10**18:
+        errors.append("Allowance is out of range")
+        return None
+    return n
+
+
+def size_text(n: int | None) -> str:
+    """The inverse, for the form: 10000000000000 → "10TB"."""
+    if not n:
+        return ""
+    for unit, scale in (("TB", 10**12), ("GB", 10**9), ("MB", 10**6)):
+        if n >= scale:
+            return f"{n / scale:g}{unit}"
+    return str(n)
+
+
+def traffic_allowance(state: dict, traffic: dict | None) -> int | None:
+    """The allowance in effect: the panel's setting, else the router's default
+    (EGRESS_TRAFFIC_ALLOWANCE). 0 or None in the panel's setting means off."""
+    section = state.get("traffic")
+    if isinstance(section, dict) and "allowance" in section:
+        a = section["allowance"]
+        return a if isinstance(a, int) and not isinstance(a, bool) and a > 0 else None
+    return (traffic or {}).get("allowance") or None
 
 
 def parse_expiry(text: str, errors: list[str]) -> str | None:
