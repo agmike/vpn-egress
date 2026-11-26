@@ -35,7 +35,7 @@
       <tr><th>Name</th><th>Addresses</th><th>Networks</th><th>Handshake</th><th>Last from</th><th>Received</th><th>Sent</th><th></th></tr>
       {% for p in peers %}{% set r = p.runtime %}
       <tr>
-        <td>{{ p.name }}</td>
+        <td class="nowrap">{{ p.name }}</td>
         <td class="mono">{{ [p.address, p.address6] | select | join(", ") }}</td>
         <td class="mono">{{ ((p.routes or []) | join(", ")) or "—" }}</td>
         <td class="{{ 'ok' if r and r.handshake_age is not none and r.handshake_age < 300 else 'muted' }}">{{ (r.handshake_age | age) if r else "—" }}</td>

@@ -17,15 +17,15 @@
       {% for e in exits %}
       {% set s = e.status %}
       <tr>
-        <td>{{ e.name }}</td>
+        <td class="nowrap">{{ e.name }}</td>
         <td class="mono">{{ e.endpoint }}</td>
         <td>{{ "yes" if e.ipv6 else "no" }}</td>
         <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif s and s.up %}<span class="ok">up</span>{% elif s %}<span class="bad">down</span>{% else %}<span class="muted">starting</span>{% endif %}</td>
         <td>{{ (s.handshake_age | age) if s else "—" }}</td>
         <td class="num">{{ (s.rx | bytes) if s else "—" }}</td>
         <td class="num">{{ (s.tx | bytes) if s else "—" }}</td>
-        <td>{% set x = e.expiry %}{% if x %}<span class="{{ x.level if x.level != 'ok' }}" title="{{ x.date }}">{{ x.date }}
-          <span class="muted">({% if x.days < 0 %}expired{% elif x.days == 0 %}today{% else %}{{ x.days }} d{% endif %})</span></span>{% else %}<span class="muted">not set</span>{% endif %}</td>
+        <td class="nowrap">{% set x = e.expiry %}{% if x %}<span class="{{ x.level if x.level != 'ok' }}" title="{{ x.date }}">{{ x.date }}
+          <span class="muted">({% if x.days < 0 %}expired{% elif x.days == 0 %}today{% else %}{{ x.days }}&nbsp;d{% endif %})</span></span>{% else %}<span class="muted">not set</span>{% endif %}</td>
         <td class="actions">
           <form method="post" action="/exits/{{ e.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}">
             <button type="submit" class="link">{{ "Disable" if e.enabled else "Enable" }}</button></form>

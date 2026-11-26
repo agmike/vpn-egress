@@ -69,7 +69,7 @@
       {% for e in status.exits %}
       <tr>
         <td class="num">{{ e.id }}</td>
-        <td>{{ e.name }}</td>
+        <td class="nowrap">{{ e.name }}</td>
         <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif e.up %}<span class="ok">up</span>{% else %}<span class="bad">down</span>{% endif %}</td>
         <td>{{ e.handshake_age | age }}</td>
         <td class="num">{{ e.rx | bytes }}</td>
@@ -90,7 +90,7 @@
       <tr><th>Name</th><th>Exit</th><th>Kill switch</th><th>Entries</th><th>Learned IPs</th></tr>
       {% for l in status.lists %}
       <tr>
-        <td><a href="/routing#list-{{ l.id }}">{{ l.name }}</a></td>
+        <td class="nowrap"><a href="/routing#list-{{ l.id }}">{{ l.name }}</a></td>
         <td>{{ exit_names.get(l.exit, l.exit) }}</td>
         <td>{{ "—" if l.exit in ("direct", "block") else ("on" if l.when_down == "block" else "off") }}</td>
         <td class="num">{{ (l.v4 or 0) + (l.v6 or 0) + (l.domains or 0) }}</td>

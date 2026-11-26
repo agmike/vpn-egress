@@ -117,7 +117,7 @@ def human_bytes(n: int | None) -> str:
     n = float(n or 0)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if n < 1024 or unit == "TiB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+            return f"{n:.0f}\u00a0{unit}" if unit == "B" else f"{n:.1f}\u00a0{unit}"
         n /= 1024
     return ""
 
@@ -138,10 +138,10 @@ def human_age(seconds: int | None) -> str:
     if seconds is None:
         return "never"
     if seconds < 120:
-        return f"{seconds} s ago"
+        return f"{seconds}\u00a0s\u00a0ago"
     if seconds < 7200:
-        return f"{seconds // 60} min ago"
-    return f"{seconds // 3600} h ago"
+        return f"{seconds // 60}\u00a0min\u00a0ago"
+    return f"{seconds // 3600}\u00a0h\u00a0ago"
 
 
 def human_size(n: int | None) -> str:
@@ -149,7 +149,8 @@ def human_size(n: int | None) -> str:
     n = float(n or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1000 or unit == "TB":
-            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}" if n < 100 else f"{n:.0f} {unit}"
+            digits = 0 if unit in ("B", "KB") or n >= 100 else 1
+            return f"{n:.{digits}f}\u00a0{unit}"
         n /= 1000
     return ""
 

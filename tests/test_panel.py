@@ -624,8 +624,8 @@ def test_traffic_meter_on_status(tmp_path):
     )
     client = signed_in(tmp_path)
     page = client.get("/").text
-    assert "8.5 TB" in page and "of 10.0 TB" in page and "85.0%" in page
-    assert "at 85% of the allowance" in page and "2026-10: 3.0 TB" in page
+    assert "8.5\u00a0TB" in page and "of 10.0\u00a0TB" in page and "85.0%" in page
+    assert "at 85% of the allowance" in page and "2026-10: 3.0\u00a0TB" in page
 
 
 def test_traffic_allowance_from_panel(tmp_path):
@@ -649,14 +649,21 @@ def test_traffic_allowance_from_panel(tmp_path):
     )
     client = signed_in(tmp_path)
     page = client.get("/").text
-    assert 'value="10TB"' in page and "of 10.0 TB" in page  # the router's default
+    assert 'value="10TB"' in page and "of 10.0\u00a0TB" in page  # the router's default
     token = csrf_of(page)
     page = client.post("/traffic", data={"csrf": token, "allowance": "5 tb"}).text
     assert state_of(tmp_path)["traffic"] == {"allowance": 5_000_000_000_000}
-    assert "Allowance set to 5.0 TB" in page and "over the allowance" in page
+    assert "Allowance set to 5.0\u00a0TB" in page and "over the allowance" in page
     page = client.post("/traffic", data={"csrf": token, "allowance": "lots"}).text
     assert "like 10TB" in page and state_of(tmp_path)["traffic"]["allowance"] == 5 * 10**12
     page = client.post("/traffic", data={"csrf": token, "allowance": "5TB", "action": "off"}).text
     assert state_of(tmp_path)["traffic"] == {"allowance": None}
     assert "Allowance turned off" in page and "no allowance" in page
     assert "over the allowance" not in page and "Turn off" not in page
+
+
+def test_units_do_not_break():
+    from vpn_egress.panel.app import human_age, human_bytes, human_size
+
+    for text in (human_bytes(2048), human_size(5 * 10**12), human_age(38), human_age(800), human_age(50000)):
+        assert " " not in text
