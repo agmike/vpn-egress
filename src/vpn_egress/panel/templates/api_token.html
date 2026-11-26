@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}API token · Egress{% endblock %}
+{% block body %}
+{% include "_header.html" %}
+<main>
+  <section>
+    <h2>Token “{{ entry.name }}”</h2>
+    <p>Copy it now: it is not stored and can't be shown again.</p>
+    <p><input type="text" id="token" class="mono" value="{{ token }}" readonly onclick="this.select()">
+      <button type="button" id="copy">Copy</button></p>
+    <p class="muted">Scope: {{ "status and backup — it can download every private key" if entry.scope == "backup" else "status (read-only)" }}.</p>
+    <pre class="mono">curl -H "Authorization: Bearer $TOKEN" {{ public_url }}/api/status
+{% if entry.scope == "backup" %}curl -X POST -H "Authorization: Bearer $TOKEN" -d '{"passphrase": "…"}' -o backup.json {{ public_url }}/api/backup{% endif %}</pre>
+    <p><a class="button" href="/#api">Done</a></p>
+  </section>
+</main>
+<script>
+document.getElementById("copy").addEventListener("click", function () {
+  const field = document.getElementById("token");
+  navigator.clipboard.writeText(field.value).then(function () { document.getElementById("copy").textContent = "Copied"; });
+});
+</script>
+{% endblock %}

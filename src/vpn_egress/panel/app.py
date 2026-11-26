@@ -17,11 +17,11 @@ from pathlib import Path
 
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import backup
+from . import api, backup
 from .state import (
     LABEL_RE,
     allocate_addresses,
@@ -200,6 +200,7 @@ def warnings(state: dict, traffic: dict | None) -> list[dict]:
             when = f"expired {-info['days']} days ago" if info["days"] < 0 else f"expires in {info['days']} days"
             out.append(
                 {
+                    "kind": "exit_expiry",
                     "level": info["level"],
                     "text": f"Exit {e.get('name')}: config {when} ({info['date']}). "
                     "Get a new one from the provider and replace it on Exits.",
@@ -208,13 +209,47 @@ def warnings(state: dict, traffic: dict | None) -> list[dict]:
     if traffic and traffic.get("allowance"):
         allowance, tx, proj = traffic["allowance"], traffic.get("tx", 0), traffic.get("projected_tx")
         if tx >= allowance:
-            out.append({"level": "bad", "text": f"Transfer this month is over the allowance: {human_size(tx)}."})
+            out.append(
+                {
+                    "kind": "traffic",
+                    "level": "bad",
+                    "text": f"Transfer this month is over the allowance: {human_size(tx)}.",
+                }
+            )
         elif tx >= 0.8 * allowance:
-            out.append({"level": "warn", "text": f"Transfer this month is at {tx / allowance:.0%} of the allowance."})
+            out.append(
+                {
+                    "kind": "traffic",
+                    "level": "warn",
+                    "text": f"Transfer this month is at {tx / allowance:.0%} of the allowance.",
+                }
+            )
         elif proj and proj > allowance:
             out.append(
-                {"level": "warn", "text": f"At this rate, transfer reaches {human_size(proj)} by the end of the month."}
+                {
+                    "kind": "traffic",
+                    "level": "warn",
+                    "text": f"At this rate, transfer reaches {human_size(proj)} by the end of the month.",
+                }
             )
+    return out
+
+
+STATUS_STALE = 300  # seconds without a router status before the API reports it
+
+
+def router_warnings(status: dict | None, applied: bool) -> list[dict]:
+    """For monitoring: the router itself (the Status page shows these inline)."""
+    now = time.time()
+    if not status or now - status.get("updated", 0) > STATUS_STALE:
+        return [{"kind": "router", "level": "bad", "text": "No recent status from the router: is it running?"}]
+    out = []
+    if status.get("error"):
+        out.append({"kind": "router", "level": "bad", "text": f"Router: {status['error']}"})
+    if applied:  # right after a change, new exits are still connecting
+        for e in status.get("exits") or []:
+            if e.get("enabled") and not e.get("up"):
+                out.append({"kind": "exit_down", "level": "bad", "text": f"Exit {e.get('name')} is down."})
     return out
 
 
@@ -334,6 +369,25 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         request.session.clear()
         return RedirectResponse("/", status_code=303)
 
+    def load_traffic(raw_state: dict) -> dict | None:
+        traffic = read_json(settings.state_dir / "traffic.json")
+        if traffic:
+            traffic["allowance"] = traffic_allowance(raw_state, traffic)
+        return traffic
+
+    def api_tokens(raw_state: dict) -> list[dict]:
+        used = api.usage(settings.state_dir)
+        return [
+            {
+                "id": t.get("id"),
+                "name": t.get("name"),
+                "scope": t.get("scope"),
+                "created": t.get("created"),
+                "last_used": used.get(str(t.get("id"))),
+            }
+            for t in api.tokens(raw_state)
+        ]
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         user = current_user(request)
@@ -345,9 +399,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         status = read_json(settings.state_dir / "status.json")
         raw_state = read_json(settings.state_dir / "state.json") or {}
         state = public_state(raw_state)
-        traffic = read_json(settings.state_dir / "traffic.json")
-        if traffic:
-            traffic["allowance"] = traffic_allowance(raw_state, traffic)
+        traffic = load_traffic(raw_state)
         return TEMPLATES.TemplateResponse(
             request,
             "index.html",
@@ -362,6 +414,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                     backup.snapshots(settings.state_dir)
                 ),
                 "allowance_text": size_text(traffic.get("allowance")) if traffic else "",
+                "tokens": api_tokens(raw_state),
                 "warnings": warnings(raw_state, traffic),
                 "flash": request.session.pop("flash", None),
                 "status_age": int(time.time()) - status["updated"] if status and status.get("updated") else None,
@@ -563,6 +616,111 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             save_section(settings.state_dir, "traffic", {"allowance": allowance})
             flash(request, f"Allowance set to {human_size(allowance)}." if allowance else "Allowance turned off.")
         return RedirectResponse("/", status_code=303)
+
+    # --- API ------------------------------------------------------------------------
+
+    @app.post("/api/tokens", response_class=HTMLResponse)
+    async def api_token_create(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        section, token, errors = api.create(load_state(), form.get("name") or "", form.get("scope") or "")
+        if errors:
+            flash(request, f"Token not created: {'; '.join(errors)}.", bad=True)
+            return RedirectResponse("/#api", status_code=303)
+        save_section(settings.state_dir, "api", section)
+        return TEMPLATES.TemplateResponse(
+            request,
+            "api_token.html",
+            {
+                "user": user,
+                "page": "status",
+                "csrf": csrf_token(request),
+                "token": token,
+                "entry": section["tokens"][-1],
+                "public_url": settings.public_url,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/tokens/{token_id}/delete")
+    async def api_token_delete(request: Request, token_id: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        items = api.tokens(load_state())
+        gone = [t for t in items if t.get("id") == token_id]
+        if gone:
+            save_section(settings.state_dir, "api", {"tokens": [t for t in items if t.get("id") != token_id]})
+            flash(request, f"Deleted token {gone[0].get('name')}; it stops working now.")
+        return RedirectResponse("/#api", status_code=303)
+
+    def api_auth(request: Request, need: str) -> tuple[dict | None, JSONResponse | None]:
+        token, error = api.authenticate(load_state(), request.headers.get("authorization"), need)
+        if token is None:
+            code = 403 if error and "scope" in error else 401
+            return None, JSONResponse({"error": error}, status_code=code, headers={"WWW-Authenticate": "Bearer"})
+        api.record_use(settings.state_dir, token["id"])
+        return token, None
+
+    @app.get("/api/status")
+    async def api_status(request: Request):
+        _, denied = api_auth(request, "status")
+        if denied:
+            return denied
+        raw_state = load_state()
+        status = read_json(settings.state_dir / "status.json")
+        traffic = load_traffic(raw_state)
+        exits = {e.get("id"): e for e in (status or {}).get("exits", []) if isinstance(e, dict)}
+        pipe = (status or {}).get("pipe") or {}
+        return JSONResponse(
+            {
+                "warnings": router_warnings(status, state_applied(settings.state_dir)) + warnings(raw_state, traffic),
+                "status_updated": (status or {}).get("updated"),
+                "router_error": (status or {}).get("error"),
+                "exits": [
+                    {
+                        "name": e.get("name"),
+                        "enabled": e.get("enabled", True),
+                        "up": (exits.get(e.get("id")) or {}).get("up"),
+                        "handshake_age": (exits.get(e.get("id")) or {}).get("handshake_age"),
+                        "expires": e.get("expires"),
+                        "days_left": (expiry_info(e.get("expires"), today()) or {}).get("days"),
+                    }
+                    for e in raw_state.get("exits", [])
+                    if isinstance(e, dict)
+                ],
+                "traffic": {k: traffic.get(k) for k in ("month", "since", "tx", "rx", "allowance", "projected_tx")}
+                if traffic
+                else None,
+                "pipe_peers": [
+                    {"handshake_age": p.get("handshake_age"), "rx": p.get("rx"), "tx": p.get("tx")}
+                    for p in pipe.get("peers") or []
+                ],
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/backup")
+    async def api_backup(request: Request):
+        _, denied = api_auth(request, "backup")
+        if denied:
+            return denied
+        passphrase = ""
+        if await request.body():
+            try:
+                body = await request.json()
+            except ValueError:
+                return JSONResponse({"error": 'body must be JSON: {"passphrase": "..."}'}, status_code=400)
+            passphrase = body.get("passphrase", "") if isinstance(body, dict) else None
+            if not isinstance(passphrase, str):
+                return JSONResponse({"error": "passphrase must be a string"}, status_code=400)
+        name = f"vpn-egress-backup-{today().isoformat()}.json"
+        return Response(
+            backup.export(load_state(), passphrase),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"},
+        )
 
     # --- backup ----------------------------------------------------------------------
 

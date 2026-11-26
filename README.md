@@ -40,6 +40,8 @@ picked per domain or IP list in a small web panel.
   routing, DNS, allowance), encrypted with a passphrase (scrypt, AES-256-GCM) or plain. A
   restore shows what it would change, is checked with the router's own rules first, and can be
   undone (the last 5 states before a restore are kept in `snapshots/`).
+- **API:** tokens made on the Status page (shown once, stored hashed) for monitoring and
+  scripted backups; see [API](#api).
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
 ## How it runs
@@ -116,6 +118,30 @@ Panel: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
 Blocklists start from `blocklist-defaults.json` in the state directory if present
 (`{"lists": [{"name": "...", "url": "https://..."}], "block": [], "allow": []}`); after the
 first save in the panel, the panel's copy is used.
+
+## API
+
+Send `Authorization: Bearer <token>`; tokens are created on the Status page with one of two
+scopes, `status` or `backup` (which includes `status`).
+
+- `GET /api/status` — for monitoring:
+  ```json
+  {"warnings": [{"kind": "exit_expiry", "level": "warn", "text": "Exit NL: config expires in 12 days (…)"}],
+   "status_updated": 1764000000, "router_error": null,
+   "exits": [{"name": "NL", "enabled": true, "up": true, "handshake_age": 40, "expires": "2027-11-24", "days_left": 363}],
+   "traffic": {"month": "2026-11", "since": 1764000000, "tx": 812000000000, "rx": 95000000000,
+               "allowance": 10000000000000, "projected_tx": 3100000000000},
+   "pipe_peers": [{"handshake_age": 40, "rx": 306000000, "tx": 282000000}]}
+  ```
+  Warning kinds: `router` (no recent status, or an apply error), `exit_down`, `exit_expiry`,
+  `traffic`; levels `warn` and `bad`.
+- `POST /api/backup` (scope `backup`) — the backup file; with a body `{"passphrase": "..."}`
+  it is encrypted, without one it holds the private keys in plain text.
+
+```sh
+curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -d '{"passphrase": "…"}' \
+  -o "egress-$(date +%F).json" https://egress.example.com/api/backup
+```
 
 ## Development
 

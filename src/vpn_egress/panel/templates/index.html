@@ -135,6 +135,40 @@
     {% endif %}
   </section>
 
+  <section id="api">
+    <h2>API</h2>
+    <p class="muted">Tokens for scripts and monitoring: <span class="mono">GET /api/status</span> (warnings, exits,
+      traffic) and, with the backup scope, <span class="mono">POST /api/backup</span>. Send
+      <span class="mono">Authorization: Bearer &lt;token&gt;</span>.</p>
+    {% if tokens %}
+    <div class="scroll"><table>
+      <tr><th>Name</th><th>Scope</th><th>Created</th><th>Last used</th><th></th></tr>
+      {% for t in tokens %}
+      <tr>
+        <td class="nowrap">{{ t.name }}</td>
+        <td>{{ "status and backup" if t.scope == "backup" else "status" }}</td>
+        <td class="nowrap">{{ t.created | date if t.created else "—" }}</td>
+        <td class="nowrap">{{ t.last_used | date if t.last_used else "never" }}</td>
+        <td class="actions">
+          <form method="post" action="/api/tokens/{{ t.id }}/delete" data-confirm="Delete token {{ t.name }}? Anything using it stops working.">
+            <input type="hidden" name="csrf" value="{{ csrf }}"><button type="submit" class="link">Delete</button></form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table></div>
+    {% endif %}
+    <details><summary>Create a token</summary>
+      <form method="post" action="/api/tokens" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+        <label>Name <input type="text" name="name" placeholder="e.g. monitoring" style="width: 200px"></label>
+        <label>Scope <select name="scope">
+          <option value="status">status (read-only)</option>
+          <option value="backup">status and backup (all private keys)</option>
+        </select></label>
+        <button type="submit">Create</button>
+      </form>
+    </details>
+  </section>
+
   <p class="muted">
     Status {{ status_age | age if status_age is not none else "missing" }}
     · build <span class="mono">{{ build_sha }}</span>

@@ -793,3 +793,73 @@ def test_new_exits_count_as_applying_until_up(tmp_path):
     mtime = (tmp_path / "state.json").stat().st_mtime_ns
     status(False)
     assert state_applied(tmp_path)  # a dead exit doesn't keep the page waiting
+
+
+def create_token(client, token, name, scope):
+    r = client.post("/api/tokens", data={"csrf": token, "name": name, "scope": scope})
+    assert r.headers.get("cache-control") == "no-store", r.text
+    return r.text.split('id="token" class="mono" value="', 1)[1].split('"', 1)[0]
+
+
+def test_api_tokens_status_and_backup(tmp_path):
+    import datetime
+
+    from vpn_egress.panel import backup
+
+    client = signed_in(tmp_path)
+    token = csrf_of(client.get("/").text)
+    soon = (datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=5)).isoformat()
+    client.post("/exits/add", data={"csrf": token, "name": "nl", "conf": CONF, "expires": soon})
+    (tmp_path / "status.json").write_text(
+        json.dumps(
+            {
+                "updated": int(time.time()),
+                "error": None,
+                "exits": [
+                    {"id": 1, "name": "nl", "enabled": True, "up": False, "handshake_age": None, "rx": 0, "tx": 0}
+                ],
+                "pipe": {
+                    "interface": "awg0",
+                    "peers": [{"handshake_age": 10, "rx": 1, "tx": 2, "public_key": "PEERKEY", "allowed_ips": "x"}],
+                },
+            }
+        )
+    )
+    reader = create_token(client, token, "monitoring", "status")
+    full = create_token(client, token, "backups", "backup")
+    assert reader.startswith("vpe_") and reader not in (tmp_path / "state.json").read_text()
+    r = client.post("/api/tokens", data={"csrf": token, "name": "backups", "scope": "status"})
+    assert "already exists" in r.text
+
+    api = TestClient(client.app)  # no session cookie: the bearer token is the only credential
+    assert api.get("/api/status").status_code == 401
+    assert api.get("/api/status", headers={"Authorization": "Bearer vpe_wrong"}).status_code == 401
+    r = api.get("/api/status", headers={"Authorization": f"Bearer {reader}"})
+    assert r.status_code == 200
+    data = r.json()
+    kinds = {w["kind"] for w in data["warnings"]}
+    assert kinds == {"exit_expiry", "exit_down"} and data["exits"][0]["days_left"] == 5
+    assert data["pipe_peers"] == [{"handshake_age": 10, "rx": 1, "tx": 2}] and PRIV not in r.text
+    assert "PEERKEY" not in r.text
+
+    assert api.post("/api/backup", headers={"Authorization": f"Bearer {reader}"}).status_code == 403
+    auth = {"Authorization": f"Bearer {full}"}
+    r = api.post("/api/backup", headers=auth, json={"passphrase": "pw"})
+    assert r.status_code == 200 and PRIV.encode() not in r.content
+    assert backup.read(r.content, "pw")[0]["exits"][0]["wireguard"]["private_key"] == PRIV
+    assert PRIV.encode() in api.post("/api/backup", headers=auth).content  # no body: plain
+    assert api.post("/api/backup", headers=auth, content=b"nope").status_code == 400
+    assert api.post("/api/backup", headers=auth, json={"passphrase": 5}).status_code == 400
+
+    page = client.get("/").text
+    assert "monitoring" in page and "never" not in page.split('id="api"', 1)[1].split("</section>", 1)[0]
+    client.post("/api/tokens/1/delete", data={"csrf": token})
+    assert api.get("/api/status", headers={"Authorization": f"Bearer {reader}"}).status_code == 401
+    assert api.get("/api/status", headers={"Authorization": f"Bearer {full}"}).status_code == 200
+
+
+def test_api_reports_a_silent_router(tmp_path):
+    client = signed_in(tmp_path)
+    reader = create_token(client, csrf_of(client.get("/").text), "m", "status")
+    r = TestClient(client.app).get("/api/status", headers={"Authorization": f"Bearer {reader}"})
+    assert [w["kind"] for w in r.json()["warnings"]] == ["router"]
