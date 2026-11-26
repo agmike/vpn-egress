@@ -1013,3 +1013,20 @@ def test_live_page_data_and_actions(tmp_path):
 
     signed_out = TestClient(client.app)
     assert signed_out.get("/live/data").status_code == 401
+
+
+def test_live_watch_replaces_a_file_it_cannot_touch(tmp_path, monkeypatch):
+    from vpn_egress.panel import live
+
+    (tmp_path / "live-watch").write_text("")
+    real = os.utime
+
+    def utime(path, *a, **kw):
+        if str(path).endswith("live-watch") and not getattr(utime, "done", False):
+            utime.done = True
+            raise PermissionError(13, "Permission denied")
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(live.os, "utime", utime)
+    live.touch_watch(tmp_path)
+    assert (tmp_path / "live-watch").exists() and utime.done

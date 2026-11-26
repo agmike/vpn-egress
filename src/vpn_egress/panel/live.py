@@ -23,6 +23,10 @@ def touch_watch(state_dir: Path) -> None:
         os.utime(path)
     except FileNotFoundError:
         path.write_text("")
+    except PermissionError:
+        # Someone else's file (made by root, say): the directory is ours, so replace it.
+        path.unlink(missing_ok=True)
+        path.write_text("")
 
 
 def _peers(state: dict) -> list[tuple[str, list]]:
