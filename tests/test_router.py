@@ -333,6 +333,23 @@ def test_pipe_validate_and_render():
     assert "ListenPort = 443" in conf and "H1 = 100000-200000" in conf
     assert "AllowedIPs = 10.66.0.2/32, fd66::2/128" in conf
     assert "AllowedIPs = 10.66.0.3/32, 0.0.0.0/0, ::/0" in conf
+    assert v["peers"][1]["networks"] == [] and v["peers"][0]["networks"] == []
+    routed = pipe.validate(
+        {
+            **good,
+            "peers": [
+                {
+                    "id": 3,
+                    "name": "R",
+                    "public_key": key(),
+                    "address": "10.66.0.4/32",
+                    "routes": ["192.168.10.0/24", "::/0"],
+                }
+            ],
+        },
+        c,
+    )
+    assert routed["peers"][0]["networks"] == ["192.168.10.0/24"]
     for bad in (
         {"obfuscation": {"Jc": "seven"}},
         {"obfuscation": {"I1": "<b 0x00>\nPostUp = rm -rf /"}},

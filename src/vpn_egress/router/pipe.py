@@ -5,13 +5,18 @@ section (written by the panel):
   "pipe": {
     "private_key": "...",
     "obfuscation": {"Jc": 7, "Jmin": 52, ..., "H1": "100000-200000", "I1": "<b 0x...><r 8>"},
-    "peers": [{"id": 1, "name": "Phone", "kind": "device" | "site",
-               "public_key": "...", "address": "10.66.0.2/32", "address6": "fd66::2/128",
-               "routes": ["0.0.0.0/0", "::/0"]}]          # sites: what's behind them
+    "peers": [{"id": 1, "name": "Home router", "public_key": "...",
+               "address": "10.66.0.2/32", "address6": "fd66::2/128",
+               "routes": ["192.168.10.0/24", "0.0.0.0/0", "::/0"]}]   # networks behind it
   }
 Port, addresses and MTU come from settings (the host firewall depends on
 them). Without a pipe section the interface is left alone (e.g. managed by
 awg-quick on the host), and only its status is reported.
+
+A peer's networks are accepted as source addresses (its AllowedIPs) and, if
+narrower than /0, routed to the pipe (proto 99 routes in the main table), so
+other peers can reach them through this server. 0.0.0.0/0 and ::/0 only
+mean "accept any source" (a router whose IPv6 prefix changes, say).
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ RANGE_RE = re.compile(r"^[0-9]{1,10}(-[0-9]{1,10})?$")
 SIGNATURE_RE = re.compile(r"^(<[a-z]{1,3}( [0-9a-fA-Fx]{1,4096})?>){1,64}$")
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,40}$")
 MAX_PEERS = 250
+ROUTE_PROTO = "99"  # marks the routes we add for peers' networks
 
 
 class PipeError(ValueError):
@@ -110,7 +116,8 @@ def validate(pipe, cfg: Config) -> dict:
                 raise PipeError(f"{what}: bad route {r!r}") from exc
         if not allowed:
             raise PipeError(f"{what}: needs an address or routes")
-        peers.append({"id": pid, "name": name, "kind": p.get("kind", "device"), "public_key": pub, "allowed": allowed})
+        nets = [str(n) for n in (ipaddress.ip_network(r, strict=False) for r in routes) if n.prefixlen > 0]
+        peers.append({"id": pid, "name": name, "public_key": pub, "allowed": allowed, "networks": nets})
     return {"private_key": _key(pipe.get("private_key"), "pipe"), "obfuscation": clean_obf, "peers": peers}
 
 
@@ -155,6 +162,19 @@ def apply(pipe: dict, cfg: Config, last: list[str]) -> None:
             for a in want:
                 run("ip", fam, "addr", "add", a, "dev", iface)
     run("ip", "link", "set", iface, "mtu", str(cfg.pipe_mtu), "up")
+    sync_routes(pipe, iface)
+
+
+def sync_routes(pipe: dict, iface: str) -> None:
+    """Routes for the networks behind peers, so other peers reach them."""
+    want = {n for p in pipe["peers"] for n in p.get("networks", [])}
+    for fam in ("-4", "-6"):
+        have = {r.get("dst") for r in ip_json(fam, "route", "show", "proto", ROUTE_PROTO)}
+        for dst in have - want:
+            run("ip", fam, "route", "del", dst, "proto", ROUTE_PROTO, check=False)
+        for dst in sorted(want - have):
+            if (":" in dst) == (fam == "-6"):
+                run("ip", fam, "route", "replace", dst, "dev", iface, "proto", ROUTE_PROTO)
 
 
 def status(cfg: Config, pipe: dict | None) -> dict:

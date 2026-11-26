@@ -525,17 +525,17 @@ def test_pipe_create_and_device_config(tmp_path):
     client, token = pipe_ready(tmp_path)
     pipe = state_of(tmp_path)["pipe"]
     assert pipe["peers"] == [] and pipe["obfuscation"]["I1"].startswith("<b ")
-    r = client.post("/pipe/devices", data={"csrf": token, "name": "Phone"})
+    r = client.post("/pipe/peers", data={"csrf": token, "name": "Phone"})
     assert r.status_code == 200 and r.headers["cache-control"] == "no-store"
-    assert "<svg" in r.text and "Download .conf" in r.text
+    assert "<svg" in r.text and "viewBox" in r.text and "Save as file" in r.text and 'id="copy"' in r.text
     conf = r.text.split("<textarea", 1)[1].split(">", 1)[1].split("</textarea>", 1)[0]
     priv = conf.split("PrivateKey = ", 1)[1].split("\n", 1)[0]
     peer = state_of(tmp_path)["pipe"]["peers"][0]
-    assert public_key(priv) == peer["public_key"] and "private_key" not in peer
+    assert public_key(priv) == peer["public_key"] and "private_key" not in peer and peer["own_key"] is False
     assert peer["address"] == "10.66.0.2/32" and peer["address6"] == "fd66::2/128"
     assert "Endpoint = egress.example.com:443" in conf and "DNS = 10.66.0.1, fd66::1" in conf
     assert f"PublicKey = {public_key(state_of(tmp_path)['pipe']['private_key'])}" in conf
-    client.post("/pipe/devices", data={"csrf": token, "name": "Laptop"})
+    client.post("/pipe/peers", data={"csrf": token, "name": "Laptop"})
     assert state_of(tmp_path)["pipe"]["peers"][1]["address"] == "10.66.0.3/32"
     old = peer["public_key"]
     client.post("/pipe/peers/1/regenerate", data={"csrf": token})
@@ -547,19 +547,30 @@ def test_pipe_create_and_device_config(tmp_path):
     assert state_of(tmp_path)["pipe"]["private_key"] != old_server and len(state_of(tmp_path)["pipe"]["peers"]) == 1
 
 
-def test_pipe_site(tmp_path):
+def test_pipe_peer_with_own_key_and_networks(tmp_path):
     from vpn_egress.panel.state import gen_keypair
 
     client, token = pipe_ready(tmp_path)
     _, pub = gen_keypair()
-    r = client.post("/pipe/sites", data={"csrf": token, "site_name": "Home", "public_key": "nope", "routes": "x"})
-    assert r.status_code == 400 and "WireGuard key" in r.text and "not an address range" in r.text
+    r = client.post("/pipe/peers", data={"csrf": token, "name": "Home", "public_key": "nope", "networks": "x"})
+    assert r.status_code == 400 and "WireGuard key" in r.text and "not a network" in r.text
+    assert 'id="new-peer" hidden' not in r.text  # the form stays open with the errors
     r = client.post(
-        "/pipe/sites",
-        data={"csrf": token, "site_name": "Home", "public_key": pub, "routes": "0.0.0.0/0, ::/0"},
+        "/pipe/peers",
+        data={
+            "csrf": token,
+            "name": "Home router",
+            "public_key": pub,
+            "networks": "192.168.10.0/24, 192.168.50.0/24\nany",
+        },
         follow_redirects=False,
     )
     assert r.status_code == 303 and r.headers["location"] == "/pipe/peers/1/config"
+    peer = state_of(tmp_path)["pipe"]["peers"][0]
+    assert peer["own_key"] is True and peer["public_key"] == pub
+    assert peer["routes"] == ["192.168.10.0/24", "192.168.50.0/24", "0.0.0.0/0", "::/0"]
     page = client.get("/pipe/peers/1/config").text
-    assert "this site’s private key" in page and "<svg" not in page
-    assert state_of(tmp_path)["pipe"]["peers"][0]["routes"] == ["0.0.0.0/0", "::/0"]
+    assert "own private key" in page and "<svg" not in page and "# Route 192.168.10.0/24, 192.168.50.0/24" in page
+    # Regenerate turns it into a peer with panel-made keys, shown once.
+    r = client.post("/pipe/peers/1/regenerate", data={"csrf": token})
+    assert "<svg" in r.text and state_of(tmp_path)["pipe"]["peers"][0]["own_key"] is False

@@ -624,7 +624,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
     def config_page(request: Request, user: dict, peer: dict, conf: str, secret: bool):
         import segno
 
-        qr = segno.make(conf, error="l").svg_inline(scale=3, dark="#000", light="#fff") if secret else None
+        qr = segno.make(conf, error="l").svg_inline(omitsize=True, dark="#000", light="#fff") if secret else None
         resp = TEMPLATES.TemplateResponse(
             request,
             "pipe_config.html",
@@ -652,90 +652,70 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         flash(request, "New server key and obfuscation saved. Every peer needs a new config.")
         return RedirectResponse("/pipe", status_code=303)
 
-    @app.post("/pipe/devices", response_class=HTMLResponse)
-    async def pipe_add_device(request: Request):
-        user, form = await guarded_form(request)
-        if user is None:
-            return form
-        state = load_state()
-        pipe = state.get("pipe")
-        name = (form.get("name") or "").strip()
-        errors = [] if LABEL_RE.match(name) else ["Name must be 1–40 characters"]
-        if not pipe:
-            errors.append("Create the pipe first")
-        a4, a6 = allocate_addresses(pipe or {}, pipe_status().get("addresses", [])) if pipe else (None, None)
-        if pipe and not a4:
-            errors.append("No free address in the pipe subnet")
-        if errors:
-            return pipe_page(request, user, errors, {"name": name}, 400)
-        priv, pub = gen_keypair()
-        peer = {
-            "id": next_id(pipe["peers"]) or len(pipe["peers"]) + 1,
-            "name": name,
-            "kind": "device",
-            "public_key": pub,
-            "address": a4,
-            "address6": a6,
-            "created": int(time.time()),
-        }
-        pipe["peers"].append(peer)
-        save_section(settings.state_dir, "pipe", pipe)
-        return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), priv), True)
-
-    @app.post("/pipe/sites", response_class=HTMLResponse)
-    async def pipe_add_site(request: Request):
+    @app.post("/pipe/peers", response_class=HTMLResponse)
+    async def pipe_add_peer(request: Request):
         user, form = await guarded_form(request)
         if user is None:
             return form
         import base64
         import ipaddress
 
-        state = load_state()
-        pipe = state.get("pipe")
-        name = (form.get("site_name") or "").strip()
+        pipe = load_state().get("pipe")
+        name = (form.get("name") or "").strip()
         pub = (form.get("public_key") or "").strip()
+        raw_nets = (form.get("networks") or "").replace(",", "\n").split()
         errors = [] if LABEL_RE.match(name) else ["Name must be 1–40 characters"]
-        try:
-            assert len(base64.b64decode(pub, validate=True)) == 32
-        except Exception:
-            errors.append("Public key must be a WireGuard key (44 characters, base64)")
-        routes = [r.strip() for r in (form.get("routes") or "").replace(",", "\n").splitlines() if r.strip()]
-        for r in routes:
+        if pub:
             try:
-                ipaddress.ip_network(r, strict=False)
+                assert len(base64.b64decode(pub, validate=True)) == 32
+            except Exception:
+                errors.append("Public key must be a WireGuard key (44 characters, base64)")
+        nets: list[str] = []
+        for n in raw_nets:
+            if n.lower() == "any":
+                nets += ["0.0.0.0/0", "::/0"]
+                continue
+            try:
+                nets.append(str(ipaddress.ip_network(n, strict=False)))
             except ValueError:
-                errors.append(f"“{r}” is not an address range")
+                errors.append(f"“{n}” is not a network")
         if not pipe:
             errors.append("Create the pipe first")
-        elif any(p.get("public_key") == pub for p in pipe["peers"]):
+        elif pub and any(p.get("public_key") == pub for p in pipe["peers"]):
             errors.append("A peer with this public key exists")
+        a4, a6 = allocate_addresses(pipe, pipe_status().get("addresses", [])) if pipe else (None, None)
+        if pipe and not a4:
+            errors.append("No free address in the pipe subnet")
         if errors:
-            return pipe_page(
-                request, user, errors, {"site_name": name, "public_key": pub, "routes": form.get("routes", "")}, 400
-            )
-        a4, a6 = allocate_addresses(pipe, pipe_status().get("addresses", []))
+            values = {"name": name, "public_key": pub, "networks": form.get("networks", "")}
+            return pipe_page(request, user, errors, values, 400)
+        priv = None
+        if not pub:
+            priv, pub = gen_keypair()
         peer = {
             "id": next_id(pipe["peers"]) or len(pipe["peers"]) + 1,
             "name": name,
-            "kind": "site",
             "public_key": pub,
+            "own_key": priv is None,
             "address": a4,
             "address6": a6,
-            "routes": routes or ["0.0.0.0/0", "::/0"],
+            "routes": sorted(set(nets), key=nets.index),
             "created": int(time.time()),
         }
         pipe["peers"].append(peer)
         save_section(settings.state_dir, "pipe", pipe)
-        return RedirectResponse(f"/pipe/peers/{peer['id']}/config", status_code=303)
+        if priv is None:
+            return RedirectResponse(f"/pipe/peers/{peer['id']}/config", status_code=303)
+        return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), priv), True)
 
     @app.get("/pipe/peers/{peer_id}/config", response_class=HTMLResponse)
-    async def pipe_site_config(request: Request, peer_id: int):
+    async def pipe_peer_config(request: Request, peer_id: int):
         user = current_user(request)
         if user is None:
             return RedirectResponse("/", status_code=303)
         pipe = load_state().get("pipe") or {}
         peer = find(pipe.get("peers", []), peer_id)
-        if peer is None or peer.get("kind") != "site":
+        if peer is None or not (peer.get("own_key") or peer.get("kind") == "site"):
             return RedirectResponse("/pipe", status_code=303)
         return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), None), False)
 
@@ -746,10 +726,11 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             return form
         pipe = load_state().get("pipe") or {}
         peer = find(pipe.get("peers", []), peer_id)
-        if peer is None or peer.get("kind") != "device":
+        if peer is None:
             return RedirectResponse("/pipe", status_code=303)
         priv, pub = gen_keypair()
-        peer["public_key"] = pub
+        peer.update(public_key=pub, own_key=False)
+        peer.pop("kind", None)
         save_section(settings.state_dir, "pipe", pipe)
         return config_page(request, user, peer, render_client_config(pipe, peer, pipe_status(), priv), True)
 

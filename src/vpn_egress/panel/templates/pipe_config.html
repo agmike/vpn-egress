@@ -1,5 +1,13 @@
 {% extends "base.html" %}
-{% block title %}{{ peer.name }} · Pipe · Egress{% endblock %}
+{% block title %}{{ peer.name }} · Pipe · Egress<script>
+document.getElementById("copy").addEventListener("click", function () {
+  const ta = document.getElementById("conf");
+  const done = () => { this.textContent = "Copied"; setTimeout(() => { this.textContent = "Copy"; }, 1500); };
+  if (navigator.clipboard) { navigator.clipboard.writeText(ta.value).then(done); }
+  else { ta.select(); document.execCommand("copy"); done(); }
+});
+</script>
+{% endblock %}
 {% block body %}
 {% include "_header.html" %}
 <main>
@@ -10,13 +18,22 @@
     <div class="qr">{{ qr | safe }}</div>
     <p class="muted">Scan with the AmneziaWG app (the Amnezia VPN app ignores the DNS line).</p>
     {% else %}
-    <p class="muted">Template for a site: fill in its own private key.</p>
+    <p class="muted">Template: this peer keeps its own private key; fill it in.</p>
     {% endif %}
-    <textarea readonly spellcheck="false" rows="22">{{ conf }}</textarea>
+    <textarea readonly spellcheck="false" rows="5" id="conf">{{ conf }}</textarea>
     <p>
-      <a class="button primary" download="{{ peer.name | replace(' ', '-') }}.conf" href="data:text/plain;charset=utf-8,{{ conf | urlencode }}">Download .conf</a>
+      <button type="button" id="copy">Copy</button>
+      <a class="button primary" download="{{ peer.name | replace(' ', '-') }}.conf" href="data:text/plain;charset=utf-8,{{ conf | urlencode }}">Save as file</a>
       <a class="button" href="/pipe">Back to the pipe</a>
     </p>
   </section>
 </main>
+<script>
+document.getElementById("copy").addEventListener("click", function () {
+  const ta = document.getElementById("conf");
+  const done = () => { this.textContent = "Copied"; setTimeout(() => { this.textContent = "Copy"; }, 1500); };
+  if (navigator.clipboard) { navigator.clipboard.writeText(ta.value).then(done); }
+  else { ta.select(); document.execCommand("copy"); done(); }
+});
+</script>
 {% endblock %}

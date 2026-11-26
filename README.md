@@ -28,8 +28,10 @@ picked per domain or IP list in a small web panel.
 - **DNS:** dnsmasq on the tunnel with blocklists edited in the panel; plain DNS from the
   tunnel is redirected to it and DNS-over-TLS/QUIC is refused.
 - **Pipe (optional):** the router can own the tunnel clients arrive on: server key and
-  AmneziaWG obfuscation (**Recreate** makes new ones), devices with generated keys whose config
-  is shown once as file, text and QR code, and sites (routers that keep their own key).
+  AmneziaWG obfuscation (**Recreate** makes new ones) and peers. A peer gets generated keys and a
+  config shown once (file, text, QR code), or keeps its own key; optional networks behind it (a
+  router's LANs) are accepted from it and routed to it, so other peers reach them. The host
+  firewall must allow forwarding from the pipe to the pipe for that.
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
 ## How it runs

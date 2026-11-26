@@ -334,19 +334,22 @@ def allocate_addresses(pipe: dict, server_addresses: list[str]) -> tuple[str | N
 
 
 def render_client_config(pipe: dict, peer: dict, pipe_status: dict, private_key: str | None) -> str:
-    """A device's full config (with its private key), or a site's template."""
+    """A peer's config: complete with a generated private key, or a template
+    for a peer that keeps its own key."""
     import ipaddress
 
-    site = peer.get("kind") == "site"
     addrs = [a for a in (peer.get("address"), peer.get("address6")) if a]
     dns = [str(ipaddress.ip_interface(a).ip) for a in pipe_status.get("addresses", [])]
-    lines = ["[Interface]", f"PrivateKey = {private_key or '<this site’s private key>'}"]
+    nets = [n for n in peer.get("routes", []) if not n.endswith("/0")]
+    lines = []
+    if nets:
+        lines.append(f"# Route {', '.join(nets)} into the tunnel without NAT; replies come back on their own.")
+    lines += ["[Interface]", f"PrivateKey = {private_key or '<this peer’s own private key>'}"]
     if addrs:
         lines.append(f"Address = {', '.join(addrs)}")
-    if not site and dns:
+    if dns:
         lines.append(f"DNS = {', '.join(dns)}")
-    if not site:
-        lines.append(f"MTU = {pipe_status.get('client_mtu', 1280)}")
+    lines.append(f"MTU = {pipe_status.get('client_mtu', 1280)}")
     lines += [f"{k} = {v}" for k, v in pipe.get("obfuscation", {}).items()]
     lines += [
         "",
@@ -356,10 +359,4 @@ def render_client_config(pipe: dict, peer: dict, pipe_status: dict, private_key:
         "AllowedIPs = 0.0.0.0/0, ::/0",
         "PersistentKeepalive = 25",
     ]
-    if site:
-        lines = [
-            "# Site config: route the networks behind this site into the tunnel (no NAT needed);",
-            "# replies come back on their own. Use the site's own key pair.",
-            *lines,
-        ]
     return "\n".join(lines) + "\n"
