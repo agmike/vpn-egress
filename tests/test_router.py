@@ -363,3 +363,42 @@ def test_pipe_validate_and_render():
     assert c.pipe_manage and c.pipe_port == 443
     with pytest.raises(ConfigError):
         cfg(EGRESS_PIPE_ENDPOINT="no port")
+
+
+def test_traffic_advance_and_summary():
+    from datetime import UTC, datetime
+
+    from vpn_egress.router import traffic
+
+    def ts(*a):
+        return datetime(*a, tzinfo=UTC).timestamp()
+
+    # First run: booted this month, so the counters so far count.
+    d = traffic.advance({}, "eth0", (1000, 50), "boot-a", ts(2026, 11, 3), ts(2026, 11, 10))
+    assert (d["tx"], d["rx"], d["since"]) == (1000, 50, ts(2026, 11, 3))
+    d = traffic.advance(d, "eth0", (1500, 80), "boot-a", ts(2026, 11, 3), ts(2026, 11, 10, 1))
+    assert (d["tx"], d["rx"]) == (1500, 80)
+    # Reboot: counters start over, everything since counts.
+    d = traffic.advance(d, "eth0", (200, 10), "boot-b", ts(2026, 11, 11), ts(2026, 11, 11, 1))
+    assert (d["tx"], d["rx"]) == (1700, 90)
+    assert d["days"]["2026-11-11"] == [200, 10]
+    # Another interface: no jump.
+    d = traffic.advance(d, "eth1", (10**12, 0), "boot-b", ts(2026, 11, 11), ts(2026, 11, 11, 2))
+    assert d["tx"] == 1700
+    # New month: the old one is kept, counting starts at the 1st.
+    d = traffic.advance(d, "eth1", (10**12 + 300, 5), "boot-b", ts(2026, 11, 11), ts(2026, 12, 1, 0, 1))
+    assert d["months"]["2026-11"] == [1700, 90] and (d["month"], d["tx"]) == ("2026-12", 300)
+    s = traffic.summary(d, "eth1", 10**13, ts(2026, 12, 16, 12))
+    assert s["since"] == ts(2026, 12, 1) and s["projected_tx"] == 600  # half the month gone
+    # First run on a host that booted last month: start from zero, now.
+    d = traffic.advance({}, "eth0", (5000, 5), "boot-c", ts(2026, 10, 20), ts(2026, 11, 10))
+    assert d["tx"] == 0 and d["since"] == ts(2026, 11, 10)
+    assert traffic.summary(d, "eth0", 0, ts(2026, 11, 10, 12))["projected_tx"] is None
+
+
+def test_traffic_allowance_setting():
+    assert Config.from_env({"EGRESS_TRAFFIC_ALLOWANCE": "10TB"}).traffic_allowance == 10 * 10**12
+    assert Config.from_env({"EGRESS_TRAFFIC_ALLOWANCE": "1.5 GB"}).traffic_allowance == 1_500_000_000
+    assert Config.from_env({}).traffic_allowance == 0
+    with pytest.raises(ConfigError):
+        Config.from_env({"EGRESS_TRAFFIC_ALLOWANCE": "lots"})

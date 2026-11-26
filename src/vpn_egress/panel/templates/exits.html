@@ -13,7 +13,7 @@
     <p class="muted">Provider WireGuard tunnels from this server. Lists send traffic through them; everything else leaves from this server's own address.</p>
     {% if exits %}
     <div class="scroll"><table>
-      <tr><th>Name</th><th>Endpoint</th><th>IPv6</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th><th></th></tr>
+      <tr><th>Name</th><th>Endpoint</th><th>IPv6</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th><th>Expires</th><th></th></tr>
       {% for e in exits %}
       {% set s = e.status %}
       <tr>
@@ -24,6 +24,8 @@
         <td>{{ (s.handshake_age | age) if s else "—" }}</td>
         <td class="num">{{ (s.rx | bytes) if s else "—" }}</td>
         <td class="num">{{ (s.tx | bytes) if s else "—" }}</td>
+        <td>{% set x = e.expiry %}{% if x %}<span class="{{ x.level if x.level != 'ok' }}" title="{{ x.date }}">{{ x.date }}
+          <span class="muted">({% if x.days < 0 %}expired{% elif x.days == 0 %}today{% else %}{{ x.days }} d{% endif %})</span></span>{% else %}<span class="muted">not set</span>{% endif %}</td>
         <td class="actions">
           <form method="post" action="/exits/{{ e.id }}/toggle"><input type="hidden" name="csrf" value="{{ csrf }}">
             <button type="submit" class="link">{{ "Disable" if e.enabled else "Enable" }}</button></form>
@@ -31,11 +33,19 @@
             <button type="submit" class="link" {{ "disabled title=\"Used by a list\"" | safe if e.in_use }}>Delete</button></form>
         </td>
       </tr>
-      <tr class="subrow"><td colspan="8">
-        <details><summary>Replace config (switch server)</summary>
+      <tr class="subrow"><td colspan="9">
+        <details><summary>Edit or replace config</summary>
+          <form method="post" action="/exits/{{ e.id }}/edit" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <label>Name <input type="text" name="name" value="{{ e.name }}" style="width: 200px"></label>
+            <label>Config expires <input type="date" name="expires" value="{{ e.expiry.date if e.expiry else '' }}"></label>
+            <button type="submit">Save</button>
+          </form>
           <form method="post" action="/exits/{{ e.id }}/replace"><input type="hidden" name="csrf" value="{{ csrf }}">
-            <textarea name="conf" spellcheck="false" placeholder="Paste the new WireGuard .conf"></textarea>
-            <p><button type="submit">Replace</button></p>
+            <textarea name="conf" spellcheck="false" placeholder="Paste a new WireGuard .conf (renewed, or another server)"></textarea>
+            <div class="inline-fields">
+              <label>New config expires <input type="date" name="expires" value="{{ next_year }}"></label>
+              <button type="submit">Replace config</button>
+            </div>
           </form>
         </details>
       </td></tr>
@@ -53,7 +63,11 @@
       <input type="hidden" name="csrf" value="{{ csrf }}">
       <p><input type="text" name="name" placeholder="name, e.g. NL 1" value="{{ values.name or '' }}" style="max-width: 280px"></p>
       <textarea name="conf" spellcheck="false" placeholder="Paste a WireGuard .conf from Proton, Nord, …"></textarea>
-      <p class="muted">The private key stays on this server and is never shown again. IPv6 is used when the config has an IPv6 address.</p>
+      <div class="inline-fields">
+        <label>Config expires <input type="date" name="expires" value="{{ values.expires if values.expires is defined else next_year }}"></label>
+      </div>
+      <p class="muted">The private key stays on this server and is never shown again. IPv6 is used when the config has an IPv6 address.
+        Provider configs often expire (Proton's after up to a year); the date is only a reminder, leave it empty if yours doesn't.</p>
       <p><button type="submit" class="primary">Save</button> <button type="button" data-cancel>Cancel</button></p>
     </form>
   </section>

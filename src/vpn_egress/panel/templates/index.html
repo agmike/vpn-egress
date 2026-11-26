@@ -2,6 +2,28 @@
 {% block body %}
 {% include "_header.html" %}
 <main>
+  {% for w in warnings %}<div class="notice {{ w.level }}">{{ w.text }}</div>{% endfor %}
+
+  {% if traffic %}
+  {% set pct = (traffic.tx / traffic.allowance * 100) if traffic.allowance else none %}
+  <section>
+    <h2>Transfer this month <span class="muted mono">{{ traffic.iface }}</span></h2>
+    {% if traffic.allowance %}
+    <p><strong>{{ traffic.tx | size }}</strong> sent of {{ traffic.allowance | size }} <span class="muted">({{ "%.1f" | format(pct) }}%)</span></p>
+    <div class="meter"><span class="{{ 'bad' if pct >= 100 else 'warn' if pct >= 80 or (traffic.projected_tx and traffic.projected_tx > traffic.allowance) }}" style="width: {{ [pct, 100] | min }}%"></span></div>
+    {% else %}
+    <p><strong>{{ traffic.tx | size }}</strong> sent</p>
+    {% endif %}
+    <p class="muted">
+      Received {{ traffic.rx | size }} · today {{ traffic.today[0] | size }} sent
+      {% if traffic.projected_tx %}· at this rate {{ traffic.projected_tx | size }} by the end of the month{% endif %}
+      {% if traffic.since > traffic.month_start + 3600 %}· counted since {{ traffic.since | date }}{% endif %}
+      {% set prev = traffic.months | dictsort | last if traffic.months else none %}
+      {% if prev %}· {{ prev[0] }}: {{ prev[1][0] | size }} sent{% endif %}
+    </p>
+  </section>
+  {% endif %}
+
   {% if status is none %}
   <section><h2>Router</h2><p class="warn">No status from egress-apply yet.</p></section>
   {% else %}

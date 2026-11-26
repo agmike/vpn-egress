@@ -26,13 +26,19 @@
   header nav { display: flex; align-items: center; gap: 18px; }
   header nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
   header nav a.active, header nav a:hover { color: var(--text); }
-  input[type=text], input[type=url], textarea { font: inherit; font-size: 14px; color: var(--text);
+  input[type=text], input[type=url], input[type=date], textarea { font: inherit; font-size: 14px; color: var(--text);
            background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; width: 100%; }
   textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; min-height: 120px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 700px) { .grid2 { grid-template-columns: 1fr; } }
   .notice { border-left: 3px solid var(--ok); padding: 8px 12px; margin-bottom: 16px; background: var(--card); }
   .notice.bad { border-color: var(--bad); }
+  .notice.warn { border-color: var(--warn); }
+  .meter { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; margin: 8px 0; }
+  .meter span { display: block; height: 100%; background: var(--ok); }
+  .meter span.warn { background: var(--warn); } .meter span.bad { background: var(--bad); }
+  .inline-fields { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; margin: 8px 0; }
+  .inline-fields label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
   .notice ul { margin: 4px 0 0; padding-left: 18px; }
   td.center { text-align: center; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

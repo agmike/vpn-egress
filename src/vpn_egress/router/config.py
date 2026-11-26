@@ -27,6 +27,14 @@ def _template(value: str, field: str) -> str:
     return value
 
 
+def _size(value: str) -> int:
+    """Bytes from "10TB", "500 GB", "1.5T" (decimal units, as providers bill) or a number."""
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?)B?", value.strip().upper())
+    if not m:
+        raise ConfigError(f"EGRESS_TRAFFIC_ALLOWANCE: {value!r} is not a size like 10TB")
+    return int(float(m.group(1)) * 1000 ** " KMGT".index(m.group(2) or " "))
+
+
 def _bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
@@ -53,6 +61,8 @@ class Config:
     pipe_mtu: int
     pipe_endpoint: str
     pipe_client_mtu: int
+    traffic_iface: str = ""
+    traffic_allowance: int = 0
 
     @property
     def run_dir(self) -> Path:
@@ -80,6 +90,10 @@ class Config:
         endpoint = env.get("EGRESS_PIPE_ENDPOINT", "").strip()
         if endpoint and not re.fullmatch(r"[A-Za-z0-9.-]+:[0-9]{1,5}|\[[0-9a-fA-F:]+\]:[0-9]{1,5}", endpoint):
             raise ConfigError("EGRESS_PIPE_ENDPOINT must be host:port")
+        traffic_iface = env.get("EGRESS_TRAFFIC_IFACE", "").strip()
+        if traffic_iface and not IFACE_RE.fullmatch(traffic_iface):
+            raise ConfigError(f"EGRESS_TRAFFIC_IFACE: bad interface name {traffic_iface!r}")
+        allowance = env.get("EGRESS_TRAFFIC_ALLOWANCE", "").strip()
         upstreams = []
         for u in get("EGRESS_DNS_UPSTREAMS", "9.9.9.9,149.112.112.112").split(","):
             try:
@@ -108,6 +122,8 @@ class Config:
                 pipe_mtu=int(get("EGRESS_PIPE_MTU", "1380")),
                 pipe_endpoint=endpoint,
                 pipe_client_mtu=int(get("EGRESS_PIPE_CLIENT_MTU", "1280")),
+                traffic_iface=traffic_iface,
+                traffic_allowance=_size(allowance) if allowance else 0,
             )
         except ValueError as exc:
             raise ConfigError(f"bad numeric setting: {exc}") from exc

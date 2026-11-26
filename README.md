@@ -18,7 +18,8 @@ picked per domain or IP list in a small web panel.
 ## What it does
 
 - **Exits:** paste a provider's WireGuard `.conf` (Proton, Nord, …); each becomes a
-  kernel WireGuard tunnel, IPv4 and IPv6.
+  kernel WireGuard tunnel, IPv4 and IPv6. Each has an optional "config expires" date (new ones
+  default to a year ahead); the Status page warns 30 days before.
 - **Routing:** ordered lists, each sent to an exit, **This server** or **Block**; first match
   wins (for domains too). Entries: domains with subdomains (`example.com`), whole TLDs (`jp`),
   GeoIP countries and services (`JP`, `NETFLIX`), ASNs (`AS2906`), addresses and ranges, and
@@ -32,6 +33,9 @@ picked per domain or IP list in a small web panel.
   config shown once (file, text, QR code), or keeps its own key; optional networks behind it (a
   router's LANs) are accepted from it and routed to it, so other peers reach them. The host
   firewall must allow forwarding from the pipe to the pipe for that.
+- **Transfer meter:** bytes sent and received on the uplink per calendar month (UTC), kept
+  across restarts and reboots, with an optional allowance (OCI's free tier: 10 TB outbound),
+  a month-end projection and a warning at 80%.
 - **Panel:** OIDC sign-in only (any provider; access by group).
 
 ## How it runs
@@ -98,6 +102,8 @@ Router:
 | `EGRESS_PIPE_PORT` / `EGRESS_PIPE_MTU` | `51820` / `1380` | |
 | `EGRESS_PIPE_ADDRESSES` | `10.66.0.1/24,fd66::1/64` | server addresses; peers get addresses from these subnets |
 | `EGRESS_PIPE_ENDPOINT` / `EGRESS_PIPE_CLIENT_MTU` | — / `1280` | `host:port` and MTU written into client configs |
+| `EGRESS_TRAFFIC_IFACE` | default route's | interface the transfer meter counts |
+| `EGRESS_TRAFFIC_ALLOWANCE` | — | monthly outbound allowance, e.g. `10TB` (decimal units) |
 
 Panel: `PUBLIC_URL`, `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
 `OIDC_ALLOWED_GROUPS` (comma-separated; the provider must send a `groups` claim),

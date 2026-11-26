@@ -10,7 +10,7 @@ import sys
 import time
 import traceback
 
-from . import blocklists, firewall
+from . import blocklists, firewall, traffic
 from . import pipe as pipe_mod
 from .apply import StateError, apply, required_sources, validate
 from .config import Config, ConfigError
@@ -19,6 +19,7 @@ from .sources import SourceCache
 from .system import nft_apply
 
 POLL = 2  # seconds between checks of the state file
+TRAFFIC_INTERVAL = 60
 
 
 def log(msg: str) -> None:
@@ -51,6 +52,24 @@ def main() -> int:
         except (StateError, ValueError, OSError) as exc:
             log(f"sources: {exc}")
 
+    meter = traffic.Meter(
+        cfg.data_dir / "traffic.json",
+        cfg.state_dir / "traffic.json",
+        cfg.traffic_iface,
+        cfg.traffic_allowance,
+        cfg.state_uid,
+    )
+    meter_error: list[str | None] = [None]
+
+    def do_traffic() -> None:
+        try:
+            err = meter.sample()
+        except Exception as exc:  # never stop routing over the meter
+            err = f"{type(exc).__name__}: {exc}"
+        if err != meter_error[0]:
+            log(f"traffic: {err}" if err else "traffic: counting")
+            meter_error[0] = err
+
     nft_apply(firewall.render(cfg))
     last_routes: list[str] = []
     last_pipe: list[str] = []
@@ -81,7 +100,8 @@ def main() -> int:
     stale = not blocklist_file.exists() or time.time() - blocklist_file.stat().st_mtime > cfg.blocklist_interval
     do_blocklists(quick=not stale)
     now = time.monotonic()
-    last_apply = last_full = last_sources = now
+    last_apply = last_full = last_sources = last_traffic = now
+    do_traffic()
     last_mtime = state_file.stat().st_mtime if state_file.exists() else None
 
     while not stop:
@@ -105,6 +125,9 @@ def main() -> int:
         elif now - last_apply >= cfg.apply_interval:
             do_apply("interval")
             last_apply = now
+        if now - last_traffic >= TRAFFIC_INTERVAL:
+            do_traffic()
+            last_traffic = now
         if now - last_full >= cfg.blocklist_interval:
             do_blocklists(quick=False)
             last_full = now
@@ -114,6 +137,7 @@ def main() -> int:
             last_sources = last_apply = now
 
     log("stopping")
+    do_traffic()
     dns.stop()
     return 0
 

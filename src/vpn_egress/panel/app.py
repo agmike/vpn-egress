@@ -7,6 +7,7 @@ state.json; the router (vpn-egress-router) validates and applies it.
 
 from __future__ import annotations
 
+import datetime
 import os
 import secrets
 import time
@@ -25,10 +26,12 @@ from .state import (
     dns_config,
     dns_from_form,
     exit_from_form,
+    expiry_info,
     gen_keypair,
     gen_obfuscation,
     list_from_form,
     next_id,
+    parse_expiry,
     parse_wg_conf,
     public_key,
     read_json,
@@ -138,8 +141,53 @@ def human_age(seconds: int | None) -> str:
     return f"{seconds // 3600} h ago"
 
 
+def human_size(n: int | None) -> str:
+    """Decimal units, as providers bill transfer (10 TB = 10^13 bytes)."""
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}" if n < 100 else f"{n:.0f} {unit}"
+        n /= 1000
+    return ""
+
+
+def today() -> datetime.date:
+    return datetime.datetime.now(datetime.UTC).date()
+
+
+def warnings(state: dict, traffic: dict | None) -> list[dict]:
+    """Things to act on soon: exit configs expiring, the transfer allowance."""
+    out = []
+    for e in state.get("exits", []):
+        if not isinstance(e, dict) or not e.get("enabled", True):
+            continue
+        info = expiry_info(e.get("expires"), today())
+        if info and info["level"] != "ok":
+            when = f"expired {-info['days']} days ago" if info["days"] < 0 else f"expires in {info['days']} days"
+            out.append(
+                {
+                    "level": info["level"],
+                    "text": f"Exit {e.get('name')}: config {when} ({info['date']}). "
+                    "Get a new one from the provider and replace it on Exits.",
+                }
+            )
+    if traffic and traffic.get("allowance"):
+        allowance, tx, proj = traffic["allowance"], traffic.get("tx", 0), traffic.get("projected_tx")
+        if tx >= allowance:
+            out.append({"level": "bad", "text": f"Transfer this month is over the allowance: {human_size(tx)}."})
+        elif tx >= 0.8 * allowance:
+            out.append({"level": "warn", "text": f"Transfer this month is at {tx / allowance:.0%} of the allowance."})
+        elif proj and proj > allowance:
+            out.append(
+                {"level": "warn", "text": f"At this rate, transfer reaches {human_size(proj)} by the end of the month."}
+            )
+    return out
+
+
 TEMPLATES.env.filters["bytes"] = human_bytes
+TEMPLATES.env.filters["size"] = human_size
 TEMPLATES.env.filters["age"] = human_age
+TEMPLATES.env.filters["date"] = lambda ts: time.strftime("%-d %b %H:%M UTC", time.gmtime(ts))
 
 
 def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
@@ -233,7 +281,9 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             # signing out would look like it did nothing.
             return TEMPLATES.TemplateResponse(request, "landing.html", {})
         status = read_json(settings.state_dir / "status.json")
-        state = public_state(read_json(settings.state_dir / "state.json"))
+        raw_state = read_json(settings.state_dir / "state.json") or {}
+        state = public_state(raw_state)
+        traffic = read_json(settings.state_dir / "traffic.json")
         return TEMPLATES.TemplateResponse(
             request,
             "index.html",
@@ -243,6 +293,8 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "csrf": csrf_token(request),
                 "status": status,
                 "state": state,
+                "traffic": traffic,
+                "warnings": warnings(raw_state, traffic),
                 "status_age": int(time.time()) - status["updated"] if status and status.get("updated") else None,
                 "build_sha": os.environ.get("BUILD_SHA", "unknown")[:12],
             },
@@ -343,6 +395,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                     "ipv6": bool(wg.get("address6")),
                     "in_use": e.get("id") in used,
                     "status": st.get(e.get("id")),
+                    "expiry": expiry_info(e.get("expires"), today()),
                 }
             )
         return TEMPLATES.TemplateResponse(
@@ -353,6 +406,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "page": "exits",
                 "csrf": csrf_token(request),
                 "exits": exits,
+                "next_year": (today() + datetime.timedelta(days=365)).isoformat(),
                 "flash": request.session.pop("flash", None),
                 "errors": errors or [],
                 "values": values or {},
@@ -376,6 +430,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         errors = [] if LABEL_RE.match(name) else ["Name must be 1–40 characters"]
         wg, conf_errors = parse_wg_conf(form.get("conf", ""))
         errors += conf_errors
+        expires = parse_expiry(form.get("expires", ""), errors)
         state = load_state()
         exits = [e for e in state.get("exits", []) if isinstance(e, dict)]
         if any(e.get("name") == name for e in exits):
@@ -384,8 +439,8 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if new_id is None:
             errors.append("No free exit slots")
         if errors:
-            return exits_page(request, user, errors, {"name": name}, status_code=400)
-        exits.append({"id": new_id, "name": name, "enabled": True, "wireguard": wg})
+            return exits_page(request, user, errors, {"name": name, "expires": form.get("expires")}, status_code=400)
+        exits.append({"id": new_id, "name": name, "enabled": True, "expires": expires, "wireguard": wg})
         save_section(settings.state_dir, "exits", exits)
         flash(request, f"Added {name}. It connects within a minute.")
         return RedirectResponse("/exits", status_code=303)
@@ -416,11 +471,34 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if e is None:
             return RedirectResponse("/exits", status_code=303)
         wg, errors = parse_wg_conf(form.get("conf", ""))
+        expires = parse_expiry(form.get("expires", ""), errors)
         if errors:
             return exits_page(request, user, [f"{e['name']}: {x}" for x in errors], status_code=400)
         e["wireguard"] = wg
+        e["expires"] = expires
         save_section(settings.state_dir, "exits", exits)
         flash(request, f"{e['name']}: new config saved; it reconnects within a minute.")
+        return RedirectResponse("/exits", status_code=303)
+
+    @app.post("/exits/{exit_id}/edit", response_class=HTMLResponse)
+    async def exits_edit(request: Request, exit_id: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        exits = load_state().get("exits", [])
+        e = find(exits, exit_id)
+        if e is None:
+            return RedirectResponse("/exits", status_code=303)
+        name = (form.get("name") or "").strip()
+        errors = [] if LABEL_RE.match(name) else ["Name must be 1–40 characters"]
+        if any(x is not e and isinstance(x, dict) and x.get("name") == name for x in exits):
+            errors.append(f"An exit named {name} already exists")
+        expires = parse_expiry(form.get("expires", ""), errors)
+        if errors:
+            return exits_page(request, user, [f"{e['name']}: {x}" for x in errors], status_code=400)
+        e["name"], e["expires"] = name, expires
+        save_section(settings.state_dir, "exits", exits)
+        flash(request, f"{name} saved.")
         return RedirectResponse("/exits", status_code=303)
 
     @app.post("/exits/{exit_id}/delete")

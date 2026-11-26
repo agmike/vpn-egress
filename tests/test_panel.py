@@ -574,3 +574,55 @@ def test_pipe_peer_with_own_key_and_networks(tmp_path):
     # Regenerate turns it into a peer with panel-made keys, shown once.
     r = client.post("/pipe/peers/1/regenerate", data={"csrf": token})
     assert "<svg" in r.text and state_of(tmp_path)["pipe"]["peers"][0]["own_key"] is False
+
+
+def test_exit_expiry_default_edit_and_warning(tmp_path):
+    import datetime
+
+    client = signed_in(tmp_path)
+    today = datetime.datetime.now(datetime.UTC).date()
+    next_year = (today + datetime.timedelta(days=365)).isoformat()
+    page = client.get("/exits").text
+    assert f'value="{next_year}"' in page  # the add form's default
+    token = csrf_of(page)
+    soon = (today + datetime.timedelta(days=10)).isoformat()
+    client.post("/exits/add", data={"csrf": token, "name": "nl", "conf": CONF, "expires": soon})
+    assert state_of(tmp_path)["exits"][0]["expires"] == soon
+    assert "config expires in 10 days" in client.get("/").text
+    r = client.post("/exits/1/edit", data={"csrf": token, "name": "nl 2", "expires": "not a date"})
+    assert r.status_code == 400 and "YYYY-MM-DD" in r.text
+    client.post("/exits/1/edit", data={"csrf": token, "name": "nl 2", "expires": ""})
+    ex = state_of(tmp_path)["exits"][0]
+    assert ex["name"] == "nl 2" and ex["expires"] is None
+    assert "expires in" not in client.get("/").text
+    client.post("/exits/1/replace", data={"csrf": token, "conf": CONF, "expires": next_year})
+    assert state_of(tmp_path)["exits"][0]["expires"] == next_year
+    past = (today - datetime.timedelta(days=3)).isoformat()
+    client.post("/exits/1/edit", data={"csrf": token, "name": "nl 2", "expires": past})
+    assert "expired 3 days ago" in client.get("/").text
+
+
+def test_traffic_meter_on_status(tmp_path):
+    now = int(time.time())
+    (tmp_path / "traffic.json").write_text(
+        json.dumps(
+            {
+                "updated": now,
+                "iface": "eth0",
+                "month": "2026-11",
+                "since": now - 86400 * 20,
+                "month_start": now - 86400 * 20,
+                "tx": 8_500_000_000_000,
+                "rx": 1_000_000_000,
+                "allowance": 10_000_000_000_000,
+                "projected_tx": 12_000_000_000_000,
+                "today": [1_000_000, 0],
+                "days": {},
+                "months": {"2026-10": [3_000_000_000_000, 0]},
+            }
+        )
+    )
+    client = signed_in(tmp_path)
+    page = client.get("/").text
+    assert "8.5 TB" in page and "of 10.0 TB" in page and "85.0%" in page
+    assert "at 85% of the allowance" in page and "2026-10: 3.0 TB" in page

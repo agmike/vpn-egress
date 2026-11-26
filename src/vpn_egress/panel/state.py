@@ -7,6 +7,7 @@ checks here only give friendly errors in the forms.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -179,6 +180,36 @@ def parse_wg_conf(text: str) -> tuple[dict | None, list[str]]:
     if errors:
         return None, errors
     return {"private_key": priv, "public_key": pub, "endpoint": endpoint, "address": v4, "address6": v6, "dns": dns}, []
+
+
+EXPIRY_WARN_DAYS = 30
+
+
+def parse_expiry(text: str, errors: list[str]) -> str | None:
+    """An exit's "expires on" date (YYYY-MM-DD) from a form; empty is none."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        day = datetime.date.fromisoformat(text)
+    except ValueError:
+        errors.append("Expiry date must be a date (YYYY-MM-DD)")
+        return None
+    if not 2000 <= day.year <= 2100:
+        errors.append("Expiry date is out of range")
+        return None
+    return day.isoformat()
+
+
+def expiry_info(expires, today) -> dict | None:
+    """Days left and how urgent, for showing an exit's expiry date."""
+    try:
+        day = datetime.date.fromisoformat(expires)
+    except (TypeError, ValueError):
+        return None
+    days = (day - today).days
+    level = "bad" if days < 0 else "warn" if days <= EXPIRY_WARN_DAYS else "ok"
+    return {"date": day.isoformat(), "days": days, "level": level}
 
 
 def next_id(items: list[dict]) -> int | None:
