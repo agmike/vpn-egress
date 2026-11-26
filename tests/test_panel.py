@@ -667,3 +667,33 @@ def test_units_do_not_break():
 
     for text in (human_bytes(2048), human_size(5 * 10**12), human_age(38), human_age(800), human_age(50000)):
         assert " " not in text
+
+
+def test_pages_wait_for_the_router(tmp_path, monkeypatch):
+    import vpn_egress.panel.app as panel_app
+
+    monkeypatch.setattr(panel_app, "APPLY_WAIT", 0.3)
+    client = signed_in(tmp_path)
+    token = csrf_of(client.get("/exits").text)
+
+    def router_status(mtime):
+        (tmp_path / "status.json").write_text(json.dumps({"updated": int(time.time()), "state_mtime": mtime}))
+
+    router_status(None)
+    started = time.monotonic()
+    add_exit(client)  # the router never applies it: the save waits, then gives up
+    assert 0.3 <= time.monotonic() - started < 3
+    page = client.get("/routing").text
+    assert "Applying changes" in page and client.get("/applied").json() == {"applied": False}
+    router_status((tmp_path / "state.json").stat().st_mtime_ns)
+    assert "Applying changes" not in client.get("/routing").text
+    assert client.get("/applied").json() == {"applied": True}
+    # Pages rendered for a POST (errors, one-time configs) never get the reloading note.
+    router_status(None)
+    r = client.post("/exits/add", data={"csrf": token, "name": "x", "conf": "bad"})
+    assert r.status_code == 400 and "Applying changes" not in r.text
+
+
+def test_applied_needs_sign_in(tmp_path):
+    client = make_client(tmp_path, {"sub": "1", "groups": ["admins"]})
+    assert client.get("/applied").status_code == 401

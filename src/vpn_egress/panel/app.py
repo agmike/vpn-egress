@@ -7,6 +7,7 @@ state.json; the router (vpn-egress-router) validates and applies it.
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import os
 import secrets
@@ -42,7 +43,28 @@ from .state import (
     traffic_allowance,
 )
 
-TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+APPLY_WAIT = 5.0  # seconds a save waits for the router to apply it
+
+
+def state_applied(state_dir: Path) -> bool:
+    """Has the router applied the current state.json? True when it can't
+    tell (no state yet, or a router that doesn't report it)."""
+    status = read_json(state_dir / "status.json") or {}
+    if "state_mtime" not in status:
+        return True
+    try:
+        return status["state_mtime"] == (state_dir / "state.json").stat().st_mtime_ns
+    except FileNotFoundError:
+        return True
+
+
+def _applying(request: Request) -> dict:
+    # Only on GET pages: the script reloads the page, which must not re-send a form.
+    settings = getattr(request.app.state, "settings", None)
+    return {"applying": request.method == "GET" and settings is not None and not state_applied(settings.state_dir)}
+
+
+TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"), context_processors=[_applying])
 ICON_SVG = (Path(__file__).parent / "static" / "icon.svg").read_bytes()
 SESSION_HOURS = 8
 
@@ -196,6 +218,34 @@ TEMPLATES.env.filters["date"] = lambda ts: time.strftime("%-d %b %H:%M UTC", tim
 
 def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.settings = settings
+
+    @app.middleware("http")
+    async def wait_for_router(request: Request, call_next):
+        """After a POST that changed the state, give the router a moment to
+        apply it, so the next page shows the result."""
+        state_file = settings.state_dir / "state.json"
+
+        def mtime():
+            try:
+                return state_file.stat().st_mtime_ns
+            except FileNotFoundError:
+                return None
+
+        before = mtime() if request.method == "POST" else None
+        response = await call_next(request)
+        if request.method == "POST" and mtime() != before:
+            deadline = time.monotonic() + APPLY_WAIT
+            while not state_applied(settings.state_dir) and time.monotonic() < deadline:
+                await asyncio.sleep(0.25)
+        return response
+
+    @app.get("/applied", include_in_schema=False)
+    async def applied(request: Request):
+        if current_user(request) is None:
+            return PlainTextResponse("", status_code=401)
+        return {"applied": state_applied(settings.state_dir)}
+
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.session_secret,

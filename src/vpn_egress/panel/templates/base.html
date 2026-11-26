@@ -80,6 +80,9 @@
   .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
   .scroll { overflow-x: auto; }
+  .applying { position: fixed; bottom: 16px; right: 16px; z-index: 10; background: var(--card); color: var(--text);
+              border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 8px 12px;
+              font-size: 14px; box-shadow: 0 2px 8px rgba(0, 0, 0, .15); }
   /* Phones: each table row becomes a card of "label  value" lines (labels
      come from the header row, see labelTables below). */
   @media (max-width: 640px) {
@@ -116,6 +119,26 @@
 <body>
 {% block body %}{% endblock %}
 <script>
+// The router hasn't applied the last change yet: wait for it, then reload so
+// the page shows the result (or offer a reload if an editor is open).
+(function () {
+  const note = document.getElementById("applying");
+  if (!note) return;
+  let tries = 0;
+  function editing() {
+    return document.querySelector(".editor:not([hidden]), section[id^='new']:not([hidden]), details[open]") !== null;
+  }
+  function poll() {
+    if (++tries > 80) { note.textContent = "Still applying; reload later to see the result."; return; }
+    fetch("/applied", { credentials: "same-origin" }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.applied) return setTimeout(poll, 1500);
+      if (!editing()) return location.reload();
+      note.innerHTML = 'Applied. <a href="">Reload</a> to see the result.';
+    }).catch(function () { setTimeout(poll, 3000); });
+  }
+  setTimeout(poll, 1000);
+})();
+
 // Card layout on phones: give each cell its column's header as data-label.
 function labelTables() {
   document.querySelectorAll(".scroll table").forEach(function (table) {

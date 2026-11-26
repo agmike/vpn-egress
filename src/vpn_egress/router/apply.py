@@ -590,6 +590,12 @@ def apply(
 ) -> dict:
     status = {"updated": int(time.time()), "error": None, "exits": [], "lists": []}
     state_file = cfg.state_dir / "state.json"
+    # Which version of the state this status describes: the panel waits for
+    # it after a save, so pages show the result, not the previous state.
+    try:
+        status["state_mtime"] = state_file.stat().st_mtime_ns
+    except FileNotFoundError:
+        status["state_mtime"] = None
     try:
         raw = json.loads(state_file.read_text()) if state_file.exists() else {}
         state = validate(raw)
