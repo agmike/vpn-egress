@@ -264,8 +264,12 @@ class _Handler(socketserver.StreamRequestHandler):
         self.request.settimeout(30)
         try:
             line = self.rfile.readline(4096)
-            query = json.loads(line or b"{}").get("q", "")
-            reply = self.server.lookup.answer(str(query)[:253])
+            request = json.loads(line or b"{}")
+            commands = getattr(self.server, "commands", None)
+            if "cmd" in request and commands is not None:
+                reply = commands(request)
+            else:
+                reply = self.server.lookup.answer(str(request.get("q", ""))[:253])
         except Exception as exc:  # a bad request or a bug: answer, don't die
             reply = {"error": f"lookup failed: {type(exc).__name__}"}
         self.wfile.write((json.dumps(reply) + "\n").encode())
@@ -275,10 +279,12 @@ class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
-def serve(lookup: Lookup, path: Path, uid: int) -> _Server:
+def serve(lookup: Lookup, path: Path, uid: int, commands=None) -> _Server:
+    """commands: answers requests with a "cmd" (exit switches and the like)."""
     path.unlink(missing_ok=True)
     server = _Server(str(path), _Handler)
     server.lookup = lookup
+    server.commands = commands
     os.chmod(path, 0o600)
     try:
         os.chown(path, uid, 0)  # the panel's uid; nobody else

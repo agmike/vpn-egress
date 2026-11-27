@@ -20,6 +20,12 @@ picked per domain or IP list in a small web panel.
 - **Exits:** paste a provider's WireGuard `.conf` (Proton, Nord, …); each becomes a
   kernel WireGuard tunnel, IPv4 and IPv6. Each has an optional "config expires" date (new ones
   default to a year ahead); the Status page warns 30 days before.
+  Each exit is pinged every 30 s (latency, packet loss, IPv4 and IPv6) and its traffic rate
+  recorded (speed from real traffic only), with 7 days of history. **Fallback** (Proton): when
+  an exit degrades (down, loss over 20%, latency over twice its usual, IPv6 failing) it moves to
+  another server in a chosen country with the same key, the next if that one degrades too, and
+  back to its own server after 6 hours, when idle; or by hand. Server list:
+  [gluetun-servers](https://github.com/qdm12/gluetun-servers) (a few servers per country).
 - **Routing:** ordered lists, each sent to an exit, **This server** or **Block**; first match
   wins (for domains too). Entries: domains with subdomains (`example.com`), whole TLDs (`jp`),
   GeoIP countries and services (`JP`, `NETFLIX`), ASNs (`AS2906`), addresses and ranges, and
@@ -123,6 +129,7 @@ Router:
 | `EGRESS_PIPE_ADDRESSES` | `10.66.0.1/24,fd66::1/64` | server addresses; peers get addresses from these subnets |
 | `EGRESS_PIPE_ENDPOINT` / `EGRESS_PIPE_CLIENT_MTU` | — / `1280` | `host:port` and MTU written into client configs |
 | `EGRESS_LIVE_LOG` | `true` | dnsmasq query log and conntrack events for the Live page (memory only), and lookups |
+| `EGRESS_SERVERS_URL` | gluetun-servers `{provider}.json` | provider server lists for fallback servers (`off` to go without) |
 | `EGRESS_COUNTRY_DB_URL` / `EGRESS_ASN_DB_URL` | MetaCubeX `country.mmdb` / `GeoLite2-ASN.mmdb` | lookup databases (`off` to go without) |
 | `EGRESS_TRAFFIC_IFACE` | default route's | interface the transfer meter counts |
 | `EGRESS_TRAFFIC_ALLOWANCE` | — | monthly outbound allowance, e.g. `10TB` (decimal units), until one is set in the panel |

@@ -102,17 +102,22 @@ def labelled(state_dir: Path, state: dict) -> dict:
     }
 
 
-def ask_router(state_dir: Path, query: str, timeout: float = 20.0) -> dict:
-    """A lookup, answered by the router over its socket (see router/lookup.py)."""
+def router_call(state_dir: Path, payload: dict, timeout: float = 20.0) -> dict:
+    """A request to the router over its socket (lookups, exit switches; see
+    router/lookup.py and router/main.py). Raises OSError/ValueError."""
     import json
     import socket
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
         s.settimeout(timeout)
         s.connect(str(state_dir / "lookup.sock"))
-        s.sendall((json.dumps({"q": query}) + "\n").encode())
+        s.sendall((json.dumps(payload) + "\n").encode())
         with s.makefile("rb") as f:
             return json.loads(f.readline(1 << 20) or b"{}")
+
+
+def ask_router(state_dir: Path, query: str, timeout: float = 20.0) -> dict:
+    return router_call(state_dir, {"q": query}, timeout)
 
 
 REASONS = {"range": "a range on the list", "learned": "learned from DNS", "geoip": "GeoIP", "asn": "", "url": "list"}

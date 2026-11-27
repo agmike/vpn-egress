@@ -87,6 +87,8 @@
            font-size: 14px; line-height: 1; }
   .toolbar input[type=text] { width: 240px; }
   .toolbar [hidden] { display: none; }
+  .inline-fields label.check { flex-direction: row; align-items: center; gap: 6px; color: var(--text); font-size: 14px; }
+  .small { font-size: 12px; }
   .lookup-head { display: flex; justify-content: space-between; align-items: center; margin: 8px 0; }
   #lookup { position: static; } #lookup table.format { margin: 6px 0 12px; } #lookup table.format td { vertical-align: top; }
   .toolbar label.check { display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 4px; font-size: 14px;
@@ -114,6 +116,7 @@
     .scroll tr { border-top: 1px solid var(--line); padding: 8px 0; }
     .scroll tr.head + tr { border-top: none; }
     .scroll tr.subrow { border-top: none; padding-top: 0; }
+    .scroll tr.subrow td { display: block; text-align: left; }
     .scroll td { border: none; padding: 3px 0; display: flex; gap: 16px; justify-content: space-between;
                  align-items: center; text-align: right; white-space: normal; overflow-wrap: anywhere; }
     .scroll td[data-label]::before { content: attr(data-label); color: var(--muted); text-align: left;
@@ -172,6 +175,12 @@ function labelTables() {
       if (row === head || row.cells.length === 1) return;  // subrows span the table
       Array.from(row.cells).forEach(function (cell, i) {
         if (labels[i]) cell.dataset.label = labels[i];
+        // A cell's parts stay together (the card layout spreads a cell's children apart).
+        if (cell.childNodes.length > 1 && !cell.classList.contains("actions")) {
+          const wrap = document.createElement("span");
+          while (cell.firstChild) wrap.appendChild(cell.firstChild);
+          cell.appendChild(wrap);
+        }
       });
       const first = row.cells[0];
       if (first && !first.querySelector("input, select, textarea")) first.classList.add("card-title");

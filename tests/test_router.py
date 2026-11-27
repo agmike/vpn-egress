@@ -628,3 +628,161 @@ def test_router_health(tmp_path):
     old = time.time() - 600
     os.utime(tmp_path / "status.json", (old, old))
     assert "apply loop is stuck" in health(c, proc)
+
+
+SERVERS_JSON = {
+    "version": 4,
+    "servers": [
+        {
+            "vpn": "wireguard",
+            "country": "Netherlands",
+            "city": "Amsterdam",
+            "server_name": "NL#1",
+            "wgpubkey": None,
+            "ips": ["198.51.100.1", "2001:db8::1"],
+        },
+        {
+            "vpn": "wireguard",
+            "country": "Netherlands",
+            "city": "Amsterdam",
+            "server_name": "NL#2",
+            "ips": ["198.51.100.2", "2001:db8::2"],
+        },
+        {
+            "vpn": "wireguard",
+            "country": "Netherlands",
+            "city": "Amsterdam",
+            "server_name": "NL#3",
+            "ips": ["198.51.100.3"],
+        },
+        {
+            "vpn": "wireguard",
+            "country": "Netherlands",
+            "city": "Amsterdam",
+            "server_name": "CH-NL#1",
+            "secure_core": True,
+            "ips": ["198.51.100.4", "2001:db8::4"],
+        },
+        {"vpn": "openvpn", "country": "Netherlands", "server_name": "NL#9", "ips": ["198.51.100.9"]},
+    ],
+}
+
+
+def server_list(tmp_path):
+    from vpn_egress.router.servers import ServerList
+
+    doc = json.loads(json.dumps(SERVERS_JSON))
+    for s in doc["servers"]:
+        if "wgpubkey" not in s:
+            s["wgpubkey"] = key()
+    (tmp_path / "servers").mkdir(exist_ok=True)
+    (tmp_path / "servers" / "protonvpn.json").write_text(json.dumps(doc))
+    return ServerList(tmp_path / "servers", "")
+
+
+def test_server_list_candidates(tmp_path):
+    sl = server_list(tmp_path)
+    assert [s["name"] for s in sl.servers("protonvpn")] == ["NL#2", "NL#3", "CH-NL#1"]  # no key / not WireGuard: out
+    assert sl.countries("protonvpn") == [{"country": "Netherlands", "servers": 2, "ipv6": 1}]
+    assert [s["name"] for s in sl.candidates("protonvpn", "Netherlands", True, set())] == ["NL#2"]
+    assert sorted(s["name"] for s in sl.candidates("protonvpn", "Netherlands", False, {"NL#2"})) == ["NL#3"]
+    assert sl.servers("protonvpn")[0]["endpoint"] == "198.51.100.2:51820"
+
+
+def test_exit_fallback_validation():
+    raw = state()
+    raw["exits"][0]["fallback"] = {"enabled": True, "country": "Netherlands"}
+    ex = apply.validate(raw)["exits"][3]
+    assert ex["fallback"] == {"enabled": True, "provider": "protonvpn", "country": "Netherlands", "ipv6": True}
+    raw["exits"][0]["fallback"] = {"enabled": True, "provider": "elsewhere", "country": "X"}
+    with pytest.raises(apply.StateError):
+        apply.validate(raw)
+    raw["exits"][0]["fallback"] = {"enabled": True, "country": ""}  # no country: off
+    assert apply.validate(raw)["exits"][3]["fallback"]["enabled"] is False
+
+
+def test_degraded_rules():
+    from vpn_egress.router.exitmon import WINDOW, Stats, degraded
+
+    now = 1_000_000.0
+    st = Stats()
+    for i in range(24):  # two hours of usual 20 ms
+        st.add({"t": now - 7200 + i * 300, "rtt4": 20.0, "loss4": 0.0, "rtt6": 22.0, "loss6": 0.0})
+
+    def window(**s):
+        st.recent.clear()
+        for i in range(WINDOW):
+            st.add({"t": now + i, **s})
+        return degraded(st, True, 10, now + WINDOW)
+
+    assert window(rtt4=21.0, loss4=0.0, rtt6=23.0, loss6=0.0) is None
+    assert window(rtt4=None, loss4=100.0, rtt6=None, loss6=100.0) == "down: every IPv4 ping lost"
+    assert window(rtt4=25.0, loss4=40.0, rtt6=25.0, loss6=0.0) == "IPv4 packet loss 40%"
+    assert window(rtt4=150.0, loss4=0.0, rtt6=150.0, loss6=0.0) == "IPv4 latency 150 ms (usually 20 ms)"
+    assert window(rtt4=21.0, loss4=0.0, rtt6=None, loss6=100.0) == "IPv6 not working"
+    assert degraded(st, True, None, now) == "down: no handshake for 3 minutes"
+    st.recent.clear()
+    assert degraded(st, True, 10, now) is None  # too few samples to judge
+
+
+def test_exit_monitor_fallback_and_return(tmp_path, monkeypatch):
+    import time
+
+    from vpn_egress.router import exitmon
+
+    sl = server_list(tmp_path)
+    mon = exitmon.ExitMonitor(tmp_path / "exit-servers.json", tmp_path / "exit-stats.json", os.getuid(), sl)
+    ex = {
+        "id": 1,
+        "enabled": True,
+        "address6": "fd00::2/128",
+        "endpoint": "192.0.2.9:51820",
+        "fallback": {"enabled": True, "provider": "protonvpn", "country": "Netherlands", "ipv6": False},
+    }
+    mon.set_exits({1: ex})
+    t = [time.time() - 3 * 3600]  # manual commands use the real clock
+
+    def feed(n, **s):
+        """Up to n samples; stops right after a switch."""
+        mon.switched.clear()
+        for _ in range(n):
+            t[0] += 30
+            s2 = {"t": t[0], "handshake": 5, **s}
+            mon.stats.setdefault(mon._key_locked(1), exitmon.Stats()).add(s2)
+            mon.evaluate({1: s2}, t[0])
+            if mon.switched.is_set():
+                return
+
+    good = {"rtt4": 20.0, "loss4": 0.0, "rtt6": 21.0, "loss6": 0.0, "rate_rx": 50_000, "rate_tx": 5_000}
+    feed(12, **good)
+    assert mon.server_for(1) is None and not mon.switched.is_set()
+    feed(10, **{**good, "loss4": 50.0})  # degraded: to a listed server
+    first = mon.server_for(1)
+    assert first["name"] in ("NL#2", "NL#3") and mon.switched.is_set()
+    assert "packet loss" in mon.where["1"]["reason"]
+    feed(5, **{**good, "loss4": 100.0, "rtt4": None})  # settling (grace): not judged yet
+    assert mon.server_for(1) == first
+    feed(20, **{**good, "loss4": 100.0, "rtt4": None})  # the fallback is down too: the other one
+    second = mon.server_for(1)
+    assert second["name"] != first["name"]
+    feed(20, **{**good, "loss4": 100.0, "rtt4": None})  # no listed servers left: back to main
+    assert mon.server_for(1) is None and "back to main" in mon.where["1"]["reason"]
+
+    assert mon.command(1, "next")["ok"] is False  # all listed ones failed within 6 h
+    mon.failed["1"] = {}
+    assert mon.command(1, "next")["ok"] is True and mon.server_for(1) is not None
+    t[0] += exitmon.RETURN_AFTER + 60
+    mon.where["1"]["since"] = t[0] - exitmon.RETURN_AFTER - 1
+    feed(10, **good)  # busy: stays
+    assert mon.server_for(1) is not None
+    feed(10, **{**good, "rate_rx": 100, "rate_tx": 100})  # idle: back to main
+    assert mon.server_for(1) is None and "idle" in mon.where["1"]["reason"]
+
+    mon.command(1, "next")
+    again = exitmon.ExitMonitor(tmp_path / "exit-servers.json", tmp_path / "exit-stats.json", os.getuid(), sl)
+    assert again.server_for(1) == mon.server_for(1)  # survives a restart
+    again.set_exits({1: {**ex, "fallback": {"enabled": False}}})  # fallback off: back to main
+    assert again.server_for(1) is None
+    mon.publish(t[0])
+    pub = json.loads((tmp_path / "exit-stats.json").read_text())["exits"]["1"]
+    assert pub["server"]["name"] and pub["stats"]["peak_24h"]["rx"] == 50_000

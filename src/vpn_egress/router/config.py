@@ -39,6 +39,10 @@ COUNTRY_DB_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/
 ASN_DB_URL = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
 
 
+# Provider server lists for fallback servers: qdm12/gluetun-servers (MIT).
+SERVERS_URL = "https://raw.githubusercontent.com/qdm12/gluetun-servers/main/pkg/servers/{provider}.json"
+
+
 def _db_url(env: dict, name: str, default: str) -> str:
     """A lookup database URL; set to "" (or "off") to go without it."""
     value = env.get(name, default).strip()
@@ -80,6 +84,7 @@ class Config:
     live_log: bool = True
     country_db_url: str = ""
     asn_db_url: str = ""
+    servers_url: str = ""
 
     @property
     def run_dir(self) -> Path:
@@ -143,6 +148,7 @@ class Config:
                 live_log=_bool(get("EGRESS_LIVE_LOG", "true")),
                 country_db_url=_db_url(env, "EGRESS_COUNTRY_DB_URL", COUNTRY_DB_URL),
                 asn_db_url=_db_url(env, "EGRESS_ASN_DB_URL", ASN_DB_URL),
+                servers_url=_db_url(env, "EGRESS_SERVERS_URL", SERVERS_URL),
                 traffic_allowance=_size(allowance) if allowance else 0,
             )
         except ValueError as exc:

@@ -217,6 +217,28 @@ def _when_down(value, what):
     return value
 
 
+def _fallback(value, what) -> dict:
+    """An exit's fallback servers: {"enabled", "provider", "country", "ipv6"}."""
+    from .servers import PROVIDERS
+
+    if value in (None, {}):
+        return {"enabled": False}
+    if not isinstance(value, dict):
+        raise StateError(f"{what}: fallback must be an object")
+    provider = value.get("provider", "protonvpn")
+    country = value.get("country", "")
+    if provider not in PROVIDERS:
+        raise StateError(f"{what}: unknown fallback provider {provider!r}")
+    if not isinstance(country, str) or len(country) > 60 or not NAME_RE.fullmatch(country or "x"):
+        raise StateError(f"{what}: bad fallback country")
+    return {
+        "enabled": bool(value.get("enabled")) and bool(country),
+        "provider": provider,
+        "country": country,
+        "ipv6": bool(value.get("ipv6", True)),
+    }
+
+
 def validate(state) -> dict:
     if not isinstance(state, dict):
         raise StateError("state must be an object")
@@ -250,6 +272,7 @@ def validate(state) -> dict:
             "address": _iface_addr(wg.get("address"), 4, what, required=True),
             "address6": _iface_addr(wg.get("address6"), 6, what, required=False),
             "dns4": dns4[:1],
+            "fallback": _fallback(ex.get("fallback"), what),
         }
     lists, seen = [], set()
     for i, lst in enumerate(state.get("lists", [])):
@@ -610,6 +633,7 @@ def apply(
     cache: SourceCache | None = None,
     last_pipe: list[str] | None = None,
     live=None,
+    monitor=None,
 ) -> dict:
     status = {"updated": int(time.time()), "error": None, "exits": [], "lists": [], "versions": versions(cfg.pipe_tool)}
     state_file = cfg.state_dir / "state.json"
@@ -651,7 +675,12 @@ def apply(
             "handshake_age": None,
             "rx": 0,
             "tx": 0,
+            "server": None,
         }
+        server = monitor.server_for(eid) if monitor else None
+        if server:  # on a fallback server: same key and addresses, another endpoint
+            ex = {**ex, "endpoint": server["endpoint"], "public_key": server["public_key"]}
+            entry["endpoint"], entry["server"] = server["endpoint"], server["name"]
         if ex["enabled"]:
             configure_exit(ex)
             iface = f"{EXIT_PREFIX}{eid}"
@@ -692,6 +721,8 @@ def apply(
         )
     if live is not None:
         live.view = live_view(state, pipe)
+    if monitor is not None:
+        monitor.set_exits(state["exits"])
     status["default"] = {"exit": state["default"]["exit"], "when_down": state["default"]["when_down"]}
     status["pipe"] = pipe_mod.status(cfg, pipe)
     write_json(cfg.state_dir / "status.json", status, cfg.state_uid)

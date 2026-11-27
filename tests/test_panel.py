@@ -1084,3 +1084,111 @@ def test_live_lookup_labels_the_routers_answer(tmp_path):
     assert first["matches"] == [{"list": "japan", "first": True, "why": ["GeoIP JP", "learned from DNS"]}]
     assert first["route_label"] == "japan → nl" and other["route_label"] == "Everything else → This server"
     assert 'id="lookup-q"' in client.get("/live").text
+
+
+def test_exit_fallback_settings_stats_and_switch(tmp_path):
+    import socket
+    import threading
+
+    client = signed_in(tmp_path)
+    add_exit(client, "nl")
+    token = csrf_of(client.get("/exits").text)
+    r = client.post("/exits/1/edit", data={"csrf": token, "name": "nl", "expires": "", "fallback": "on"})
+    assert r.status_code == 400 and "Pick a country" in r.text
+    client.post(
+        "/exits/1/edit",
+        data={
+            "csrf": token,
+            "name": "nl",
+            "expires": "",
+            "fallback": "on",
+            "fallback_country": "Netherlands",
+            "fallback_ipv6": "on",
+        },
+    )
+    assert state_of(tmp_path)["exits"][0]["fallback"] == {
+        "enabled": True,
+        "provider": "protonvpn",
+        "country": "Netherlands",
+        "ipv6": True,
+    }
+
+    (tmp_path / "status.json").write_text(
+        json.dumps(
+            {
+                "updated": int(time.time()),
+                "exits": [{"id": 1, "name": "nl", "enabled": True, "up": True, "handshake_age": 5, "rx": 0, "tx": 0}],
+                "pipe": {"interface": "awg0", "peers": []},
+                "lists": [],
+                "error": None,
+            }
+        )
+    )
+    stats = {
+        "now": {"rtt4": 23.4, "loss4": 0.0, "rtt6": 25.0, "loss6": 0.0, "rate_rx": 1_250_000, "rate_tx": 125_000},
+        "usual": {"rtt4": 20.0, "rtt6": 22.0},
+        "peak_24h": {"rx": 12_500_000, "tx": 1_000_000},
+        "peak_7d": {"rx": 12_500_000, "tx": 1_000_000},
+        "samples": 10,
+    }
+    (tmp_path / "exit-stats.json").write_text(
+        json.dumps(
+            {
+                "updated": int(time.time()),
+                "exits": {
+                    "1": {
+                        "server": {
+                            "name": "NL#412",
+                            "city": "Amsterdam",
+                            "country": "Netherlands",
+                            "endpoint": "198.51.100.2:51820",
+                        },
+                        "since": time.time() - 60,
+                        "reason": "IPv4 packet loss 40%",
+                        "degraded": None,
+                        "stats": stats,
+                    }
+                },
+            }
+        )
+    )
+    page = client.get("/exits").text
+    assert "NL#412" in page and "23&nbsp;ms" in page and "10.0\u00a0Mbit/s" in page and "100\u00a0Mbit/s" in page
+    assert "Back to main" in page and "Next server" in page
+    status = client.get("/").text
+    assert "is on fallback server NL#412 (Amsterdam): IPv4 packet loss 40%" in status
+
+    srv = socket.socket(socket.AF_UNIX)
+    srv.bind(str(tmp_path / "lookup.sock"))
+    srv.listen(2)
+    got = []
+
+    def serve():
+        for _ in range(2):  # the Exits page asks for countries, then the switch
+            conn, _ = srv.accept()
+            with conn, conn.makefile("rwb") as f:
+                req = json.loads(f.readline())
+                got.append(req)
+                reply = (
+                    {"ok": True, "message": "switching to the main server"}
+                    if req.get("cmd") == "switch"
+                    else {"countries": [{"country": "Netherlands", "servers": 5, "ipv6": 3}], "updated": 1}
+                )
+                f.write((json.dumps(reply) + "\n").encode())
+
+    threading.Thread(target=serve, daemon=True).start()
+    r = client.post("/exits/1/switch", data={"csrf": token, "to": "main"})
+    srv.close()
+    assert got[0] == {"cmd": "switch", "exit": 1, "to": "main"}
+    assert "Switching to the main server." in r.text and "Netherlands (5, 3 with IPv6)" in r.text
+
+
+def test_exit_warnings_degraded_without_fallback():
+    from vpn_egress.panel.app import exit_warnings
+
+    state = {"exits": [{"id": 1, "name": "nl", "enabled": True}]}
+    ws = exit_warnings(state, {"exits": {"1": {"server": None, "degraded": "IPv4 latency 300 ms (usually 20 ms)"}}})
+    assert [(w["key"], w["stage"], w["text"]) for w in ws] == [
+        ("exit_degraded:1", "IPv4latency", "Exit nl: IPv4 latency 300 ms (usually 20 ms).")
+    ]
+    assert exit_warnings(state, {"exits": {"1": {"server": None, "degraded": "down: every IPv4 ping lost"}}}) == []

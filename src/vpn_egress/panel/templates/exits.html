@@ -13,17 +13,21 @@
     <p class="muted">Provider WireGuard tunnels from this server. Lists send traffic through them; everything else leaves from this server's own address.</p>
     {% if exits %}
     <div class="scroll"><table>
-      <tr><th>Name</th><th>Endpoint</th><th>IPv6</th><th>State</th><th>Handshake</th><th>Received</th><th>Sent</th><th>Expires</th><th></th></tr>
+      <tr><th>Name</th><th>Server</th><th>State</th><th>Latency</th><th>Loss</th><th>Speed ↓/↑</th><th>Expires</th><th></th></tr>
       {% for e in exits %}
-      {% set s = e.status %}
+      {% set s = e.status %}{% set m = e.mon or {} %}{% set st = m.stats or {} %}{% set now = st.now or {} %}{% set usual = st.usual or {} %}
       <tr>
         <td class="nowrap">{{ e.name }}</td>
-        <td class="mono">{{ e.endpoint }}</td>
-        <td>{{ "yes" if e.ipv6 else "no" }}</td>
-        <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif s and s.up %}<span class="ok">up</span>{% elif s %}<span class="bad">down</span>{% else %}<span class="muted">starting</span>{% endif %}</td>
-        <td>{{ (s.handshake_age | age) if s else "—" }}</td>
-        <td class="num">{{ (s.rx | bytes) if s else "—" }}</td>
-        <td class="num">{{ (s.tx | bytes) if s else "—" }}</td>
+        <td>{% if m.server %}<span class="warn" title="{{ m.reason }}">{{ m.server.name }}</span> <span class="muted">fallback</span>
+          {% else %}<span title="{{ e.endpoint }}">main</span>{% endif %}</td>
+        <td>{% if not e.enabled %}<span class="muted">disabled</span>{% elif s and s.up and m.degraded %}<span class="warn" title="{{ m.degraded }}">degraded</span>{% elif s and s.up %}<span class="ok">up</span>{% elif s %}<span class="bad">down</span>{% else %}<span class="muted">starting</span>{% endif %}</td>
+        <td class="nowrap" title="usual: {{ usual.rtt4 if usual.rtt4 is number else '—' }} ms / IPv6 {{ usual.rtt6 if usual.rtt6 is number else '—' }} ms">
+          {% if now.rtt4 is number %}{{ now.rtt4 | round | int }}&nbsp;ms{% else %}—{% endif %}
+          {% if e.ipv6 %}<span class="muted">· v6 {% if now.rtt6 is number %}{{ now.rtt6 | round | int }}&nbsp;ms{% else %}<span class="bad">none</span>{% endif %}</span>{% endif %}</td>
+        <td class="num">{% if now.loss4 is number %}<span class="{{ 'bad' if now.loss4 >= 20 else 'warn' if now.loss4 > 0 }}">{{ now.loss4 | round | int }}%</span>{% else %}—{% endif %}</td>
+        <td class="nowrap" title="now, from real traffic. Peak 24 h: {{ ((st.peak_24h or {}).rx or 0) | rate }} ↓ {{ ((st.peak_24h or {}).tx or 0) | rate }} ↑; 7 days: {{ ((st.peak_7d or {}).rx or 0) | rate }} ↓ {{ ((st.peak_7d or {}).tx or 0) | rate }} ↑">
+          {% if st %}{{ (now.rate_rx or 0) | rate }} / {{ (now.rate_tx or 0) | rate }}
+          <div class="muted small">peak {{ ((st.peak_24h or {}).rx or 0) | rate }} / {{ ((st.peak_24h or {}).tx or 0) | rate }}</div>{% else %}—{% endif %}</td>
         <td class="nowrap">{% set x = e.expiry %}{% if x %}<span class="{{ x.level if x.level != 'ok' }}" title="{{ x.date }}">{{ x.date }}
           <span class="muted">({% if x.days < 0 %}expired{% elif x.days == 0 %}today{% else %}{{ x.days }}&nbsp;d{% endif %})</span></span>{% else %}<span class="muted">not set</span>{% endif %}</td>
         <td class="actions">
@@ -33,12 +37,36 @@
             <button type="submit" class="link" {{ "disabled title=\"Used by a list\"" | safe if e.in_use }}>Delete</button></form>
         </td>
       </tr>
-      <tr class="subrow"><td colspan="9">
+      <tr class="subrow"><td colspan="8">
+        {% if e.fallback.enabled or m.server %}
+        <div class="actions">
+          <form method="post" action="/exits/{{ e.id }}/switch"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="to" value="next">
+            <button type="submit" class="link" title="To another listed server in {{ e.fallback.country }}">Next server</button></form>
+          {% if m.server %}<form method="post" action="/exits/{{ e.id }}/switch"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="to" value="main">
+            <button type="submit" class="link">Back to main</button></form>{% endif %}
+        </div>
+        {% endif %}
         <details><summary>Edit or replace config</summary>
-          <form method="post" action="/exits/{{ e.id }}/edit" class="inline-fields"><input type="hidden" name="csrf" value="{{ csrf }}">
-            <label>Name <input type="text" name="name" value="{{ e.name }}" style="width: 200px"></label>
-            <label>Config expires <input type="date" name="expires" value="{{ e.expiry.date if e.expiry else '' }}"></label>
-            <button type="submit">Save</button>
+          <form method="post" action="/exits/{{ e.id }}/edit"><input type="hidden" name="csrf" value="{{ csrf }}">
+            <div class="inline-fields">
+              <label>Name <input type="text" name="name" value="{{ e.name }}" style="width: 200px"></label>
+              <label>Config expires <input type="date" name="expires" value="{{ e.expiry.date if e.expiry else '' }}"></label>
+            </div>
+            <div class="inline-fields">
+              <label class="check"><input type="checkbox" name="fallback" {{ "checked" if e.fallback.enabled }}> Fall back to another Proton server when this one degrades</label>
+              <label>in <select name="fallback_country">
+                <option value="">country…</option>
+                {% for c in countries %}<option value="{{ c.country }}" {{ "selected" if c.country == e.fallback.country }}>{{ c.country }} ({{ c.servers }}, {{ c.ipv6 }} with IPv6)</option>{% endfor %}
+                {% if e.fallback.country and e.fallback.country not in countries | map(attribute="country") %}<option value="{{ e.fallback.country }}" selected>{{ e.fallback.country }}</option>{% endif %}
+              </select></label>
+              <label class="check"><input type="checkbox" name="fallback_ipv6" {{ "checked" if e.fallback.ipv6 or (not e.fallback and e.ipv6) }}> IPv6 servers only</label>
+            </div>
+            <p class="muted">Degraded: down, IPv4 loss over 20%, latency over twice its usual, or IPv6 failing, over 5 minutes
+              (pings every 30 s). The exit keeps its key and moves to another listed server, the next if that one degrades
+              too, and back to this config's server after 6 hours on a fallback, when idle. Server list:
+              <a href="https://github.com/qdm12/gluetun-servers" rel="noreferrer">gluetun-servers</a>, a few servers per
+              country{% if not countries %} (not downloaded yet){% endif %}.</p>
+            <p><button type="submit">Save</button></p>
           </form>
           <form method="post" action="/exits/{{ e.id }}/replace"><input type="hidden" name="csrf" value="{{ csrf }}">
             <textarea name="conf" spellcheck="false" placeholder="Paste a new WireGuard .conf (renewed, or another server)"></textarea>

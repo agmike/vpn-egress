@@ -12,7 +12,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import blocklists, firewall, live, lookup, traffic
+from . import blocklists, exitmon, firewall, live, lookup, servers, traffic
 from . import pipe as pipe_mod
 from .apply import StateError, apply, required_sources, validate
 from .config import Config, ConfigError
@@ -87,22 +87,55 @@ def main() -> int:
     cache = SourceCache(cfg.data_dir / "sources", cfg.geoip_url, cfg.asn_url)
 
     dbs = lookup.Databases(cfg.data_dir / "lookup", {"country": cfg.country_db_url, "asn": cfg.asn_db_url})
+    server_list = servers.ServerList(cfg.data_dir / "servers", cfg.servers_url)
+    monitor = exitmon.ExitMonitor(
+        cfg.data_dir / "exit-servers.json", cfg.state_dir / "exit-stats.json", cfg.state_uid, server_list
+    )
+
+    def commands(request: dict) -> dict:
+        """Requests from the panel over the socket (besides lookups)."""
+        if request.get("cmd") == "switch":
+            try:
+                eid = int(request.get("exit"))
+            except (TypeError, ValueError):
+                return {"ok": False, "message": "bad exit"}
+            return monitor.command(eid, "main" if request.get("to") == "main" else "next")
+        if request.get("cmd") == "countries":
+            provider = str(request.get("provider", "protonvpn"))
+            if provider not in servers.PROVIDERS:
+                return {"countries": []}
+            path = server_list.path(provider)
+            updated = int(path.stat().st_mtime) if path.exists() else None
+            return {"provider": provider, "countries": server_list.countries(provider), "updated": updated}
+        return {"error": "unknown command"}
+
     lookup_server = None
-    if live_log:
-        try:
-            lookup_server = lookup.serve(
-                lookup.Lookup(cfg, cache, dbs, live_log), cfg.state_dir / "lookup.sock", cfg.state_uid
-            )
-        except OSError as exc:
-            log(f"lookup: {exc}")
+    try:
+        lookup_server = lookup.serve(
+            lookup.Lookup(cfg, cache, dbs, live_log), cfg.state_dir / "lookup.sock", cfg.state_uid, commands
+        )
+    except OSError as exc:
+        log(f"panel socket: {exc}")
 
     def refresh_dbs(max_age: float) -> None:
         def work() -> None:
-            for err in dbs.refresh(max_age):
-                log(f"lookup: {err}")
+            errors = server_list.refresh(7 * 86400 if max_age != float("inf") else max_age)
+            if live_log:
+                errors += dbs.refresh(max_age)
+            for err in errors:
+                log(f"downloads: {err}")
 
-        if live_log:  # in the background: large downloads must not hold up routing
-            threading.Thread(target=work, daemon=True).start()
+        # In the background: large downloads must not hold up routing.
+        threading.Thread(target=work, daemon=True).start()
+
+    def monitor_loop() -> None:
+        while not stop:
+            started = time.monotonic()
+            try:
+                monitor.sample()
+            except Exception:  # keep monitoring
+                log(f"exit monitor failed:\n{traceback.format_exc()}")
+            time.sleep(max(1.0, exitmon.SAMPLE - (time.monotonic() - started)))
 
     def refresh_sources(max_age: float) -> None:
         """Download GeoIP/ASN/URL sources the lists use (missing ones only
@@ -139,7 +172,7 @@ def main() -> int:
 
     def do_apply(reason: str) -> None:
         try:
-            status = apply(cfg, dns, last_routes, cache, last_pipe, live_log)
+            status = apply(cfg, dns, last_routes, cache, last_pipe, live_log, monitor)
             if status["error"]:
                 log(f"apply ({reason}): {status['error']}")
             exits_waiting[0] = any(e["enabled"] and not e["up"] for e in status["exits"])
@@ -160,6 +193,7 @@ def main() -> int:
     refresh_dbs(max_age=cfg.source_interval)
     refresh_sources(max_age=cfg.source_interval)
     do_apply("start")
+    threading.Thread(target=monitor_loop, daemon=True).start()
     dns.start()
     blocklist_file = blocklists.blocklist_path(cfg)
     stale = not blocklist_file.exists() or time.time() - blocklist_file.stat().st_mtime > cfg.blocklist_interval
@@ -188,6 +222,11 @@ def main() -> int:
             last_pipe.clear()
             do_apply("pipe missing")
             last_apply = now
+        if monitor.switched.is_set():
+            monitor.switched.clear()
+            do_apply("exit server switch")
+            last_apply = now
+            fast_until = now + FAST_WINDOW
         if mtime != last_mtime:
             last_mtime = mtime
             refresh_sources(max_age=float("inf"))  # only what's missing

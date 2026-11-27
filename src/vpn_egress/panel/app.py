@@ -190,6 +190,18 @@ def human_size(n: int | None) -> str:
     return ""
 
 
+def human_rate(n: float | None) -> str:
+    """Bits per second, as speeds are usually given."""
+    bits = float(n or 0) * 8
+    for unit in ("bit/s", "kbit/s", "Mbit/s", "Gbit/s"):
+        if bits < 1000 or unit == "Gbit/s":
+            return (
+                f"{bits:.0f}\u00a0{unit}" if unit in ("bit/s", "kbit/s") or bits >= 100 else f"{bits:.1f}\u00a0{unit}"
+            )
+        bits /= 1000
+    return ""
+
+
 def today() -> datetime.date:
     return datetime.datetime.now(datetime.UTC).date()
 
@@ -255,8 +267,47 @@ def router_warnings(status: dict | None, applied: bool) -> list[dict]:
     return out
 
 
+def exit_warnings(state: dict, exit_stats: dict | None) -> list[dict]:
+    """Exits on a fallback server, or degraded with no fallback to go to."""
+    out = []
+    by_id = {str(e.get("id")): e for e in state.get("exits", []) if isinstance(e, dict)}
+    for eid, m in ((exit_stats or {}).get("exits") or {}).items():
+        ex = by_id.get(eid)
+        if not ex or not ex.get("enabled", True) or not isinstance(m, dict):
+            continue
+        name = ex.get("name")
+        server = m.get("server")
+        if server:
+            text = f"Exit {name} is on fallback server {server.get('name')} ({server.get('city')}): {m.get('reason')}."
+            out.append(
+                _warning(
+                    "exit_fallback",
+                    f"exit_fallback:{eid}",
+                    str(server.get("name")),
+                    "warn",
+                    text,
+                    f"Exit {name} is back on its main server.",
+                )
+            )
+        why = m.get("degraded")
+        if why and not why.startswith("down") and not server and not (ex.get("fallback") or {}).get("enabled"):
+            stage = why.split()[0] + why.split()[1]
+            out.append(
+                _warning(
+                    "exit_degraded",
+                    f"exit_degraded:{eid}",
+                    stage,
+                    "warn",
+                    f"Exit {name}: {why}.",
+                    f"Exit {name} is healthy again.",
+                )
+            )
+    return out
+
+
 TEMPLATES.env.filters["bytes"] = human_bytes
 TEMPLATES.env.filters["size"] = human_size
+TEMPLATES.env.filters["rate"] = lambda n: human_rate(n)
 TEMPLATES.env.filters["age"] = human_age
 TEMPLATES.env.filters["date"] = lambda ts: time.strftime("%-d %b %H:%M UTC", time.gmtime(ts))
 
@@ -398,10 +449,17 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
             for t in api.tokens(raw_state)
         ]
 
+    def exit_stats() -> dict:
+        return read_json(settings.state_dir / "exit-stats.json") or {}
+
     def current_warnings(raw_state: dict) -> list[dict]:
         status = read_json(settings.state_dir / "status.json")
         applied = state_applied(settings.state_dir)
-        return router_warnings(status, applied) + warnings(raw_state, load_traffic(raw_state))
+        return (
+            router_warnings(status, applied)
+            + warnings(raw_state, load_traffic(raw_state))
+            + exit_warnings(raw_state, exit_stats())
+        )
 
     notifier = notify.Notifier(settings.state_dir / "notify-state.json", lambda title, body: None)
 
@@ -453,7 +511,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "state": state,
                 "traffic": traffic,
                 "allowance_text": size_text(traffic.get("allowance")) if traffic else "",
-                "warnings": warnings(raw_state, traffic),
+                "warnings": warnings(raw_state, traffic) + exit_warnings(raw_state, exit_stats()),
                 "flash": request.session.pop("flash", None),
                 "status_age": int(time.time()) - status["updated"] if status and status.get("updated") else None,
                 "build_sha": os.environ.get("BUILD_SHA", "unknown")[:12],
@@ -540,6 +598,7 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
     def exits_page(request: Request, user: dict, errors=None, values=None, status_code=200):
         state = load_state()
         st = status_by_id("exits")
+        mon = exit_stats().get("exits") or {}
         used = {l.get("exit") for l in state.get("lists", []) if isinstance(l, dict)}
         exits = []
         for e in state.get("exits", []):
@@ -556,8 +615,14 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                     "in_use": e.get("id") in used,
                     "status": st.get(e.get("id")),
                     "expiry": expiry_info(e.get("expires"), today()),
+                    "fallback": e.get("fallback") or {},
+                    "mon": mon.get(str(e.get("id"))),
                 }
             )
+        try:
+            countries = live_mod.router_call(settings.state_dir, {"cmd": "countries", "provider": "protonvpn"}, 3)
+        except (OSError, ValueError):
+            countries = {}
         return TEMPLATES.TemplateResponse(
             request,
             "exits.html",
@@ -567,6 +632,8 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
                 "csrf": csrf_token(request),
                 "exits": exits,
                 "next_year": (today() + datetime.timedelta(days=365)).isoformat(),
+                "countries": countries.get("countries") or [],
+                "servers_updated": countries.get("updated"),
                 "flash": request.session.pop("flash", None),
                 "errors": errors or [],
                 "values": values or {},
@@ -1025,11 +1092,37 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         if any(x is not e and isinstance(x, dict) and x.get("name") == name for x in exits):
             errors.append(f"An exit named {name} already exists")
         expires = parse_expiry(form.get("expires", ""), errors)
+        country = (form.get("fallback_country") or "").strip()
+        if len(country) > 60 or not LABEL_RE.fullmatch(country or "x"):
+            errors.append("Bad fallback country")
+        if form.get("fallback") == "on" and not country:
+            errors.append("Pick a country for the fallback servers")
         if errors:
             return exits_page(request, user, [f"{e['name']}: {x}" for x in errors], status_code=400)
         e["name"], e["expires"] = name, expires
+        e["fallback"] = {
+            "enabled": form.get("fallback") == "on",
+            "provider": "protonvpn",
+            "country": country,
+            "ipv6": form.get("fallback_ipv6") == "on",
+        }
         save_section(settings.state_dir, "exits", exits)
         flash(request, f"{name} saved.")
+        return RedirectResponse("/exits", status_code=303)
+
+    @app.post("/exits/{exit_id}/switch")
+    async def exits_switch(request: Request, exit_id: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        to = "main" if form.get("to") == "main" else "next"
+        try:
+            r = await asyncio.to_thread(
+                live_mod.router_call, settings.state_dir, {"cmd": "switch", "exit": exit_id, "to": to}, 10
+            )
+        except (OSError, ValueError):
+            r = {"ok": False, "message": "the router doesn't answer"}
+        flash(request, f"{str(r.get('message', 'done')).capitalize()}.", bad=not r.get("ok"))
         return RedirectResponse("/exits", status_code=303)
 
     @app.post("/exits/{exit_id}/delete")
