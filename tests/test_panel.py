@@ -1192,3 +1192,21 @@ def test_exit_warnings_degraded_without_fallback():
         ("exit_degraded:1", "IPv4latency", "Exit nl: IPv4 latency 300 ms (usually 20 ms).")
     ]
     assert exit_warnings(state, {"exits": {"1": {"server": None, "degraded": "down: every IPv4 ping lost"}}}) == []
+
+
+def test_exit_renew_one_and_all(tmp_path):
+    import datetime
+
+    client = signed_in(tmp_path)
+    add_exit(client, "nl")
+    add_exit(client, "jp")
+    token = csrf_of(client.get("/exits").text)
+    year = (datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=365)).isoformat()
+    client.post("/exits/1/edit", data={"csrf": token, "name": "nl", "expires": "2026-12-01"})
+    client.post("/exits/2/edit", data={"csrf": token, "name": "jp", "expires": "2026-12-02"})
+    r = client.post("/exits/1/renew", data={"csrf": token})
+    assert f"nl: expiry set to {year}." in r.text
+    assert [e["expires"] for e in state_of(tmp_path)["exits"]] == [year, "2026-12-02"]
+    r = client.post("/exits/renew", data={"csrf": token})
+    assert f"Expiry set to {year} for nl, jp." in r.text
+    assert [e["expires"] for e in state_of(tmp_path)["exits"]] == [year, year]

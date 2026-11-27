@@ -1110,6 +1110,40 @@ def create_app(settings: Settings, oauth: OAuth | None = None) -> FastAPI:
         flash(request, f"{name} saved.")
         return RedirectResponse("/exits", status_code=303)
 
+    def renew(exit_ids: set[int] | None) -> list[str]:
+        """Set the expiry of these exits (all with None) to a year from today."""
+        exits = load_state().get("exits", [])
+        date = (today() + datetime.timedelta(days=365)).isoformat()
+        done = []
+        for e in exits:
+            if isinstance(e, dict) and (exit_ids is None or e.get("id") in exit_ids):
+                e["expires"] = date
+                done.append(str(e.get("name")))
+        if done:
+            save_section(settings.state_dir, "exits", exits)
+        return done
+
+    @app.post("/exits/renew")
+    async def exits_renew_all(request: Request):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        done = renew(None)
+        date = (today() + datetime.timedelta(days=365)).isoformat()
+        flash(request, f"Expiry set to {date} for {', '.join(done)}." if done else "No exits.")
+        return RedirectResponse("/exits", status_code=303)
+
+    @app.post("/exits/{exit_id}/renew")
+    async def exits_renew(request: Request, exit_id: int):
+        user, form = await guarded_form(request)
+        if user is None:
+            return form
+        done = renew({exit_id})
+        date = (today() + datetime.timedelta(days=365)).isoformat()
+        if done:
+            flash(request, f"{done[0]}: expiry set to {date}.")
+        return RedirectResponse("/exits", status_code=303)
+
     @app.post("/exits/{exit_id}/switch")
     async def exits_switch(request: Request, exit_id: int):
         user, form = await guarded_form(request)
